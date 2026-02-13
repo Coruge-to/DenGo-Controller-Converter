@@ -2,6 +2,7 @@ import pygame
 import pydirectinput
 import time
 import os
+import sys
 
 # --- 設定 ---
 pydirectinput.PAUSE = 0
@@ -19,7 +20,8 @@ pygame.init()
 pygame.joystick.init()
 if pygame.joystick.get_count() == 0:
     print("コントローラーが見つかりません。")
-    exit()
+    time.sleep(3)
+    sys.exit()
 joy = pygame.joystick.Joystick(0); joy.init()
 
 # --- 定数マップ ---
@@ -66,16 +68,56 @@ def get_inputs():
     p_pat = (btns[14], btns[16], btns[1])
     return b_val, p_pat, btns
 
+# --- ユーティリティ: 自動空気ブレーキの状態名 ---
+def get_auto_brake_str(val):
+    if val == 9: return "非常"
+    if val == 6: return "重なり"
+    if val == 8: return "常用"
+    return "運転" # 0
+
 # --- メイン処理 ---
 try:
     os.system('cls' if os.name == 'nt' else 'clear')
-    print("=== JRETS コントローラー (Order Fix) ===")
-    mode = input("モードを選択 (1:電気指令, 2:自動空気): ").strip()
+    print("=========================================")
+    print("    JRETS Controller Converter v1.1      ")
+    print("=========================================")
+    print("1: 電気指令式 (211系，E233系など)")
+    print("2: 自動空気ブレーキ (キハ54，185系など)")
+    print("-----------------------------------------")
+    
+    mode_input = input("モードを選択 [1/2] (Default: 1): ").strip()
+    mode = "2" if mode_input == "2" else "1"
 
+    # --- 設定入力 (Enter連打でデフォルト適用) ---
+    print("\n[ 車両設定 (Enterでデフォルト値を適用) ]")
+    
+    # 力行設定
+    p_in = input("最大力行ノッチ [1-5] (Default: 5): ").strip()
+    MAX_POWER = int(p_in) if p_in.isdigit() and 1 <= int(p_in) <= 5 else 5
+    
+    # ブレーキ設定 (電気指令式のみ)
+    MAX_BRAKE = 8
+    if mode == "1":
+        b_in = input("最大ブレーキノッチ [1-8] (Default: 8): ").strip()
+        MAX_BRAKE = int(b_in) if b_in.isdigit() and 1 <= int(b_in) <= 8 else 8
+        print(f"\n>> 設定: Mode 1 (電気指令式) | P:{MAX_POWER} / B:{MAX_BRAKE}")
+    else:
+        print(f"\n>> 設定: Mode 2 (自動空気)   | P:{MAX_POWER}")
+
+    print("\n準備完了。コントローラーを認識中...")
+    time.sleep(1)
+
+    # 初期同期
     b_val, p_pat, _ = get_inputs()
     init_p = MASCON_LEVEL_MAP.get(p_pat, 0); init_p = 0 if init_p == -1 else init_p
     init_b = ELECTRIC_BRAKE_MAP.get(b_val, 0) if mode == "1" else 0
     
+    # 初期値クランプ・マッピング
+    init_p = min(init_p, MAX_POWER)
+    if mode == "1":
+        if init_b == 9: init_b = MAX_BRAKE + 1
+        elif init_b > 0: init_b = min(init_b, MAX_BRAKE)
+
     mascon_filter = StableNotchReader(init_p)
     brake_filter = StableNotchReader(init_b)
 
@@ -83,34 +125,77 @@ try:
     last_auto_s = 0
     p_start, p_select = False, False
 
-    print(f"\n初期化: P{init_p}, B{init_b} | 制御開始...")
-
     while True:
         b_val, p_pat, btns = get_inputs()
 
-        # 入力変換 & フィルタ
+        # 入力変換
         if mode == "1": raw_b = ELECTRIC_BRAKE_MAP.get(b_val, -1)
         else: raw_b = AUTO_BRAKE_MAP.get(b_val, -1)
         raw_p = MASCON_LEVEL_MAP.get(p_pat, -1)
         
-        cur_b = brake_filter.update(raw_b)
-        cur_p = mascon_filter.update(raw_p)
+        # フィルタリング
+        filtered_b = brake_filter.update(raw_b)
+        filtered_p = mascon_filter.update(raw_p)
 
-        # HUD
-        os.system('cls' if os.name == 'nt' else 'clear')
-        print(f"マスコン: P{cur_p} | ブレーキ: B{cur_b if cur_b<9 else 'Emg'} (物理:{b_val:04b})")
-
-        # --- 処理順序の変更 ---
+        # --- クランプ処理 (修正版) ---
+        cur_p = min(filtered_p, MAX_POWER) # 力行は共通で頭打ち
         
-        # 1. 【最優先】ブレーキ立ち上がり時のマスコン強制解除
-        #    P段からB段への移行時、まず「切(s)」を送ってNにしてからでないと、ブレーキ信号が無視される場合がある
+        # ブレーキ論理値の計算
+        if mode == "1":
+            if filtered_b == 9: 
+                # 【重要】非常位置は「最大段数 + 1」として扱う
+                # これにより、最大B7設定でも 非常(8) - 最大(7) = 1 となり、計算が合う
+                cur_b = MAX_BRAKE + 1
+            elif filtered_b == 0:
+                cur_b = 0
+            else:
+                # 常用は最大段数で頭打ち
+                cur_b = min(filtered_b, MAX_BRAKE)
+        else:
+            cur_b = filtered_b
+
+        # --- HUD (UI表示) ---
+        os.system('cls' if os.name == 'nt' else 'clear')
+        print(f"=========================================")
+        print(f"  MODE: {'電気指令式' if mode=='1' else '自動空気ブレーキ'}")
+        print(f"=========================================")
+        
+        # マスコン表示
+        p_bar = "|" * cur_p + "." * (MAX_POWER - cur_p)
+        print(f" マスコン : P{cur_p} [{p_bar}]")
+        
+        # ブレーキ表示
+        if mode == "1":
+            # 表示用ロジック
+            if cur_b == MAX_BRAKE + 1: # 非常
+                b_str = "非常(EB)"
+                b_bar = "!!!!!!!!!"
+            elif cur_b == 0: 
+                b_str = "緩解(N)"
+                b_bar = "|" * 0 + "." * MAX_BRAKE
+            else: 
+                b_str = f"B{cur_b}"
+                b_bar = "|" * cur_b + "." * (MAX_BRAKE - cur_b)
+            
+            print(f" ブレーキ : {b_str:<10} [{b_bar}]")
+        else:
+            # 自動空気ブレーキ用表示
+            auto_str = get_auto_brake_str(cur_b)
+            print(f" ブレーキ : {auto_str}")
+
+        print(f"-----------------------------------------")
+        print(f" Raw Val  : P_PAT={p_pat} / B_VAL={b_val:04b}")
+        print(f" Ctrl+C で終了")
+
+        # --- 出力ロジック (Order Fix版準拠) ---
+
+        # 1. ブレーキ立ち上がり -> マスコン強制解除
         if prev_b == 0 and cur_b > 0:
             pydirectinput.press(KEY_MASCON_N)
-            time.sleep(KEY_REPEAT_DELAY) # ブレーキ信号と被らないようわずかに待つ
-            prev_p = 0 # 内部状態リセット
+            time.sleep(KEY_REPEAT_DELAY)
+            prev_p = 0
 
-        # 2. ブレーキ出力処理
-        #    マスコンがNになった後にブレーキ段数を合わせる
+        # 2. ブレーキ出力
         if mode == "2":
             new_s = 3 if cur_b==9 else (1 if cur_b==6 else (2 if cur_b==8 else 0))
             if new_s != last_auto_s:
@@ -123,20 +208,24 @@ try:
                 last_auto_s = new_s
         else:
             if cur_b != prev_b:
-                if cur_b == 9: pydirectinput.keyDown(KEY_BRAKE_EMG)
+                # 非常判定 (MAX_BRAKE + 1 かどうかで判定)
+                is_emergency = (cur_b == MAX_BRAKE + 1)
+                
+                if is_emergency: 
+                    pydirectinput.keyDown(KEY_BRAKE_EMG)
                 else:
                     pydirectinput.keyUp(KEY_BRAKE_EMG)
-                    if cur_b == 0: pydirectinput.press(KEY_BRAKE_N)
+                    if cur_b == 0: 
+                        pydirectinput.press(KEY_BRAKE_N)
                     else:
                         diff = cur_b - prev_b
                         for _ in range(abs(diff)):
                             pydirectinput.press(KEY_BRAKE_UP if diff > 0 else KEY_BRAKE_DOWN)
                             time.sleep(KEY_REPEAT_DELAY)
-                # prev_bの更新はループ末尾へ
 
-        # 3. マスコン出力処理 (ブレーキ緩解時のみ)
+        # 3. マスコン出力
         if cur_b > 0:
-            prev_p = 0 # ブレーキ中は常にN扱い
+            prev_p = 0
         else:
             if cur_p != prev_p:
                 if cur_p == 0:
@@ -148,7 +237,6 @@ try:
                         time.sleep(KEY_REPEAT_DELAY)
                 prev_p = cur_p
 
-        # 状態更新
         prev_b = cur_b
 
         # ボタン
