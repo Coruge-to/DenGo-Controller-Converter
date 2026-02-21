@@ -1,10 +1,12 @@
-# ビルド成果物（これらはRelease機能で配る）
-build/
+﻿
+venv_exe/
 dist/
+build/
 __pycache__/
+*.spec
 
-# 実行ファイル
-*.exe
-
-# その他、不要なスクリプトがあれば
-# test.py
+venv_exe/
+dist/
+build/
+*.spec
+__pycache__/
