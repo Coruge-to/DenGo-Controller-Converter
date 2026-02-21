@@ -10,3 +10,6 @@ dist/
 build/
 *.spec
 __pycache__/
+
+*.zip
+DenGo-Controller-Converter/
