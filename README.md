@@ -1,6 +1,5 @@
 # DenGo-Controller-Converter
-
-「電車でGO! コントローラー (SLPH-00501)」を、USB変換アダプタ「ELECOM JC-PS201USV」経由でPCに接続し、各種鉄道シミュレータ（JRETS、BVE、PCSX2、RPCS3等）で運転を楽しむためのコンバーターです。
+「電車でGO! コントローラー (SLPH-00501)」を、USB変換アダプタ「ELECOM JC-PS201USV」経由でPCに接続し、各種鉄道シミュレータ（JRETS、BVE、PCSX2、RPCS3等）のマスコンハンドルとして使用するためのPython製コンバーターです。
 
 ## 主な特徴
 
