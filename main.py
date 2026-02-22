@@ -32,7 +32,8 @@ max_brake = 8
 midosuji_mode = False
 ae100_mode = False
 keihan_mode = False
-mode_787 = False # ★追加
+mode_787 = False
+yokusoku_mode = False
 
 logics = {
     "JRETS": JretsLogic(),
@@ -46,7 +47,7 @@ def force_reset_state(*args):
     print(f"State Reset Executed for {game_mode}.")
 
 def toggle_game_mode(mouse_btn=1, *args):
-    global game_mode, max_power, max_brake, brake_mode, midosuji_mode, ae100_mode, keihan_mode, mode_787
+    global game_mode, max_power, max_brake, brake_mode, midosuji_mode, ae100_mode, keihan_mode, mode_787, yokusoku_mode
     modes = ["JRETS", "BVE", "PCSX2", "RPCS3"]
     idx = modes.index(game_mode)
     next_idx = (idx + 1) % len(modes) if mouse_btn == 1 else (idx - 1) % len(modes)
@@ -55,15 +56,30 @@ def toggle_game_mode(mouse_btn=1, *args):
     midosuji_mode = False
     ae100_mode = False
     keihan_mode = False
-    mode_787 = False # ★リセット
+    mode_787 = False
+    yokusoku_mode = False
     max_power = 5
     max_brake = 8
     brake_mode = "1"
     logics[game_mode].reset()
 
 def toggle_brake_mode(*args):
-    global brake_mode
-    brake_mode = "2" if brake_mode == "1" else "1"
+    global brake_mode, midosuji_mode, ae100_mode, keihan_mode, mode_787, yokusoku_mode, max_power, max_brake
+    if midosuji_mode or ae100_mode or keihan_mode or mode_787 or yokusoku_mode:
+        midosuji_mode = False
+        ae100_mode = False
+        keihan_mode = False
+        mode_787 = False
+        yokusoku_mode = False
+        max_power = 5
+        max_brake = 8
+        brake_mode = "1"
+    else:
+        brake_mode = "2" if brake_mode == "1" else "1"
+
+def toggle_yokusoku(*args):
+    global yokusoku_mode
+    yokusoku_mode = not yokusoku_mode
 
 def toggle_midosuji(*args):
     global midosuji_mode, brake_mode, max_power, max_brake, ae100_mode, keihan_mode, mode_787
@@ -116,7 +132,7 @@ def dec_p(*args):
 def inc_b(*args): 
     global max_brake
     if midosuji_mode or ae100_mode or keihan_mode or mode_787: return
-    max_brake = min(8, max_brake + 1)
+    max_brake = min(13, max_brake + 1)
 
 def dec_b(*args): 
     global max_brake
@@ -129,6 +145,28 @@ def resource_path(relative_path):
     except Exception:
         base_path = os.path.abspath(".")
     return os.path.join(base_path, relative_path)
+
+# これ追加!!!
+def get_dynamic_height(game_mode, brake_mode, max_power, max_brake):
+    box_h, spacing = 34, 6
+    gauge_start_y = 180
+    bottom_margin = 40 # 一番下のデバッグ文字用の余白
+
+    # マスコン側 (N + P1〜Pmax)
+    p_height = gauge_start_y + (max_power + 1) * (box_h + spacing)
+
+    # ブレーキ側
+    is_real_auto_air = (game_mode in ["JRETS", "BVE"] and brake_mode == "2")
+    if is_real_auto_air:
+        # 自動空気ブレーキ: 中心(250) + アーム長(180) + ラベル円(40)
+        b_height = 193 + 180 + 40
+    else:
+        # 電気指令式: N + B1〜Bmax + EB
+        b_height = gauge_start_y + (max_brake + 2) * (box_h + spacing)
+
+    # 左右で長い方に合わせる（最低でも600pxは確保）
+    req_h = max(p_height, b_height) + bottom_margin
+    return max(req_h, 0)
 
 def main():
     pygame.init()
@@ -172,9 +210,9 @@ def main():
     btn_midosuji = Button(midosuji_btn_x, (header_h - 40)//2, 60, 40, "通常", toggle_midosuji, color=COLOR_NORMAL_BTN)
     btn_ae100 = Button(midosuji_btn_x, (header_h - 40)//2, 60, 40, "通常", toggle_ae100, color=COLOR_NORMAL_BTN)
     btn_keihan = Button(midosuji_btn_x, (header_h - 40)//2, 60, 40, "通常", toggle_keihan, color=COLOR_NORMAL_BTN)
-    # ★追加: 787系ボタン (同じ場所に配置)
     btn_787 = Button(midosuji_btn_x, (header_h - 40)//2, 60, 40, "通常", toggle_787, color=COLOR_NORMAL_BTN)
-    
+    btn_yokusoku = Button(midosuji_btn_x, (header_h - 40)//2, 60, 40, "通常", toggle_yokusoku, color=COLOR_NORMAL_BTN)
+
     offset_btn = 40
     btns_cfg = [
         Button(mascon_cx - offset_btn - 14, val_y + 10, 24, 24, "－", dec_p, font_key='arrow'), 
@@ -183,7 +221,7 @@ def main():
         Button(elec_brake_cx + offset_btn - 9, val_y + 10, 24, 24, "＋", inc_b, font_key='arrow'),
     ]
 
-    all_btns = [btn_brake_mode, btn_game_mode, btn_reset, btn_midosuji, btn_ae100, btn_keihan, btn_787] + btns_cfg
+    all_btns = [btn_brake_mode, btn_game_mode, btn_reset, btn_midosuji, btn_ae100, btn_keihan, btn_787, btn_yokusoku] + btns_cfg
 
     last_visual_state = None
 
@@ -199,6 +237,7 @@ def main():
         btn_ae100.visible = (game_mode == "PCSX2") and (ae100_mode or max_brake == 5)
         btn_787.visible = (game_mode == "PCSX2") and (mode_787 or max_brake == 7) # ★追加
         btn_keihan.visible = (game_mode == "RPCS3") and (keihan_mode or max_brake == 8)
+        btn_yokusoku.visible = (game_mode in ["JRETS", "BVE"]) and (brake_mode == "1")
 
         is_special = (midosuji_mode or ae100_mode or keihan_mode or mode_787)
         is_real_auto_air = (game_mode in ["JRETS", "BVE"] and brake_mode == "2")
@@ -220,12 +259,14 @@ def main():
         if ae100_mode: btn_ae100.text = "定速"; btn_ae100.base_color = COLOR_AE100_BTN
         else: btn_ae100.text = "通常"; btn_ae100.base_color = COLOR_NORMAL_BTN
 
-        # ★追加: 787系のテキストと色
         if mode_787: btn_787.text = "特殊"; btn_787.base_color = COLOR_787_BTN
         else: btn_787.text = "通常"; btn_787.base_color = COLOR_NORMAL_BTN
 
         if keihan_mode: btn_keihan.text = "定速"; btn_keihan.base_color = COLOR_AE100_BTN
         else: btn_keihan.text = "通常"; btn_keihan.base_color = COLOR_NORMAL_BTN
+
+        if yokusoku_mode: btn_yokusoku.text = "抑速"; btn_yokusoku.base_color = COLOR_B_SVC
+        else: btn_yokusoku.text = "通常"; btn_yokusoku.base_color = COLOR_NORMAL_BTN
 
         b_val, p_pat, raw_btns = get_inputs(joy)
         
@@ -240,11 +281,11 @@ def main():
         cur_b = brake_filter.update(raw_b)
         
         if game_mode in ["PCSX2", "RPCS3"]:
-             if cur_b == 9: display_b = max_brake + 1
+             if cur_b == 14: display_b = max_brake + 1
              elif midosuji_mode and cur_b > max_brake: display_b = max_brake
              else: display_b = min(cur_b, max_brake)
         elif brake_mode == "1":
-             if cur_b == 9: display_b = max_brake + 1
+             if cur_b == 14: display_b = max_brake + 1
              else: display_b = min(cur_b, max_brake)
         else:
              display_b = cur_b 
@@ -253,39 +294,50 @@ def main():
         current_visual_state = (
             game_mode, brake_mode, 
             max_power, max_brake,
-            midosuji_mode, ae100_mode, keihan_mode, mode_787,
+            midosuji_mode, ae100_mode, keihan_mode, mode_787, yokusoku_mode,
             display_p, display_b,
             tuple(b.hover for b in all_btns if b.visible),
             b_val, p_pat
         )
 
         if current_visual_state != last_visual_state:
+            # ★ 追加: ウィンドウの伸縮処理
+            req_h = get_dynamic_height(game_mode, brake_mode, max_power, max_brake)
+            if screen.get_height() != req_h:
+                screen = pygame.display.set_mode((SCREEN_WIDTH, req_h))
+
             screen.fill(COLOR_BG)
             pygame.draw.rect(screen, COLOR_HEADER_BG, (0, 0, SCREEN_WIDTH, header_h))
             pygame.draw.line(screen, (80,80,80), (0, header_h), (SCREEN_WIDTH, header_h), 1)
             
-            # ★引数に mode_787 を追加
             draw_header_title(screen, game_mode, brake_mode, midosuji_mode, ae100_mode, keihan_mode, mode_787, header_h)
 
+            # --- マスコン段数の文字 ---
             lbl_p_t = ui.fonts['ui_label'].render("マスコン段数", True, COLOR_TEXT_DIM)
             screen.blit(lbl_p_t, lbl_p_t.get_rect(center=(mascon_cx, label_y + 10)))
             
+            # マスコンは最大5段
             lbl_p_v = ui.fonts['val'].render(f"{max_power}段", True, COLOR_TEXT)
-            screen.blit(lbl_p_v, lbl_p_v.get_rect(midright=(mascon_cx + 24, val_y + 22)))
+            screen.blit(lbl_p_v, lbl_p_v.get_rect(midright=(mascon_cx + 24, val_y + 22))) # 座標はキープ！
 
+            # --- ブレーキ段数の文字 ---
             if not is_real_auto_air:
                 lbl_b_t = ui.fonts['ui_label'].render("ブレーキ段数", True, COLOR_TEXT_DIM)
                 screen.blit(lbl_b_t, lbl_b_t.get_rect(center=(elec_brake_cx, label_y + 10)))
-                lbl_b_v = ui.fonts['val'].render(f"{max_brake}段", True, COLOR_TEXT)
-                screen.blit(lbl_b_v, lbl_b_v.get_rect(midright=(elec_brake_cx + 24, val_y + 22)))
+                
+                # 10段以上の時は val_small を使ってUIを整える
+                b_font = ui.fonts['val_small'] if max_brake >= 10 else ui.fonts['val']
+                b_offset_x = 2 if max_brake >= 10 else 0
+                lbl_b_v = b_font.render(f"{max_brake}段", True, COLOR_TEXT)
+                screen.blit(lbl_b_v, lbl_b_v.get_rect(midright=(elec_brake_cx + 24 + b_offset_x, val_y + 22)))
 
             draw_bar_gauge(screen, mascon_cx, gauge_start_y, display_p, max_power, True, is_ae100=ae100_mode, is_keihan=keihan_mode)
             
             if not is_real_auto_air:
-                draw_bar_gauge(screen, elec_brake_cx, gauge_start_y, display_b, max_brake, False, is_midosuji=midosuji_mode, is_keihan=keihan_mode)
+                draw_bar_gauge(screen, elec_brake_cx, gauge_start_y, display_b, max_brake, False, is_midosuji=midosuji_mode, is_keihan=keihan_mode, is_yokusoku=yokusoku_mode)
             else:
                 auto_cx = (SCREEN_WIDTH - MARGIN_SIDE) - 40 - (180 * 0.94) 
-                draw_auto_brake_unit(screen, int(auto_cx), 250, display_b)
+                draw_auto_brake_unit(screen, int(auto_cx), 193, display_b)
 
             for btn in all_btns:
                 if btn.visible: btn.draw(screen)
@@ -294,7 +346,9 @@ def main():
             b_fmt_str = f"B=({b_bits[0]}, {b_bits[1]}, {b_bits[2]}, {b_bits[3]})"
             dbg_str = f"RAW: P={p_pat} {b_fmt_str} GAME={game_mode}"
             dbg = ui.fonts['ui_label'].render(dbg_str, True, (80, 80, 80))
-            screen.blit(dbg, (20, SCREEN_HEIGHT - 30))
+            
+            # ★ 修正: SCREEN_HEIGHT ではなく、現在の screen.get_height() の下端に追従させる
+            screen.blit(dbg, (20, screen.get_height() - 30))
 
             pygame.display.flip()
             last_visual_state = current_visual_state

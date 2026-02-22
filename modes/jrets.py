@@ -22,7 +22,7 @@ class JretsLogic(BaseLogic):
         cur_p = raw_p
         cur_b = 0
         if brake_mode == "1":
-            if raw_b == 9: cur_b = max_brake + 1
+            if raw_b == 14: cur_b = max_brake + 1
             elif raw_b == 0: cur_b = 0
             else: cur_b = min(raw_b, max_brake)
         else:
@@ -35,10 +35,7 @@ class JretsLogic(BaseLogic):
             
             # 自動空気ブレーキの初期状態推定
             if brake_mode == "2":
-                if cur_b == 0: self.last_auto_s = 0
-                elif cur_b == 6: self.last_auto_s = 1
-                elif cur_b == 8: self.last_auto_s = 2
-                else: self.last_auto_s = 3
+                self.last_auto_s = cur_b
             
             self.needs_sync = False
             return # 初回はここで終了（キー送信しない）
@@ -48,10 +45,7 @@ class JretsLogic(BaseLogic):
         is_logical_run = False
 
         if brake_mode == "2":
-            if cur_b == 0:   target_brake_s = 0
-            elif cur_b == 6: target_brake_s = 1
-            elif cur_b == 8: target_brake_s = 2
-            else:            target_brake_s = 3
+            target_brake_s = cur_b
             is_logical_run = (target_brake_s == 0)
         else:
             is_logical_run = (cur_b == 0)

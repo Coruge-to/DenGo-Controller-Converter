@@ -19,7 +19,7 @@ class BveLogic(BaseLogic):
 
         cur_p = raw_p
         if brake_mode == "1":
-            if raw_b == 9: cur_b = max_brake + 1
+            if raw_b == 14: cur_b = max_brake + 1
             elif raw_b == 0: cur_b = 0
             else: cur_b = min(raw_b, max_brake)
         else:
@@ -32,10 +32,7 @@ class BveLogic(BaseLogic):
             
             # 自動空気ブレーキの位置推定
             if brake_mode == "2":
-                if cur_b == 9: self.auto_state = 3
-                elif cur_b == 8: self.auto_state = 2
-                elif cur_b == 6: self.auto_state = 1
-                else: self.auto_state = 0
+                self.auto_state = cur_b
             
             self.needs_sync = False
             return
@@ -79,11 +76,7 @@ class BveLogic(BaseLogic):
                 self.prev_p = 0
             
             if brake_mode == "2":
-                target_state = 0
-                if cur_b == 9: target_state = 3
-                elif cur_b == 8: target_state = 2
-                elif cur_b == 6: target_state = 1
-                else: target_state = 0
+                target_state = cur_b
                 
                 if target_state == 3 and self.auto_state != 3:
                     pydirectinput.press(KEY_BRAKE_EMG)

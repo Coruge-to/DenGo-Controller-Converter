@@ -14,6 +14,7 @@ def init_fonts():
     fonts['header_title'] = pygame.font.SysFont("meiryo", 26, bold=True)
     fonts['midosuji_title'] = pygame.font.SysFont("meiryo", 25, bold=True)
     fonts['val'] = pygame.font.SysFont("meiryo", 28, bold=True)
+    fonts['val_small'] = pygame.font.SysFont("meiryo", 22, bold=True)
     fonts['gauge'] = pygame.font.SysFont("meiryo", 24, bold=True)
     fonts['gauge_s'] = pygame.font.SysFont("meiryo", 20, bold=True)
     fonts['arrow'] = pygame.font.SysFont("meiryo", 20, bold=True)
@@ -79,7 +80,7 @@ def draw_solid_arc(surface, color, center, r_inner, r_outer, start_deg, end_deg)
     points.append((cx + r_inner * math.cos(rad_start), cy - r_inner * math.sin(rad_start)))
     pygame.draw.polygon(surface, color, points)
 
-def draw_bar_gauge(surface, center_x, start_y, current_val, max_val, is_mascon, is_midosuji=False, is_ae100=False, is_keihan=False):
+def draw_bar_gauge(surface, center_x, start_y, current_val, max_val, is_mascon, is_midosuji=False, is_ae100=False, is_keihan=False, is_yokusoku=False):
     width = 110
     box_h = 34
     spacing = 6
@@ -152,6 +153,12 @@ def draw_bar_gauge(surface, center_x, start_y, current_val, max_val, is_mascon, 
             elif is_keihan_nukitori:
                 txt = "抜取"
                 font_to_use = fonts['keihan_b8']
+            elif is_yokusoku:
+                if i == 1:
+                    txt = "抑速"
+                    font_to_use = fonts['keihan_b8'] 
+                else:
+                    txt = f"B{i-1}"
             else: txt = f"B{i}"
             
         ren = font_to_use.render(txt, True, txt_col_val)
@@ -185,11 +192,11 @@ def draw_auto_brake_unit(surface, center_x, center_y, current_val):
     draw_solid_arc(surface, col_run, center, r_inner, r_outer, 200, 270 + overlap_angle)
     draw_solid_arc(surface, col_svc, center, r_inner, r_outer, 270 - overlap_angle, 380)
     
-    angles = { 0: 200, 6: 270, 8: 330, 9: 20 }
+    angles = { 0: 200, 1: 270, 2: 330, 3: 20 }
     target_angle = angles.get(current_val, 200)
     
-    labels = [(0, "運転", 200, COLOR_N), (6, "重なり", 270, COLOR_B_SVC), 
-              (8, "常用", 330, COLOR_B_SVC), (9, "非常", 20, COLOR_B_EMG)]
+    labels = [(0, "運転", 200, COLOR_N), (1, "重なり", 270, COLOR_B_SVC), 
+              (2, "常用", 330, COLOR_B_SVC), (3, "非常", 20, COLOR_B_EMG)]
     
     for val, text, ang, act_color in labels:
         lx = center[0] + label_radius * math.cos(math.radians(ang))

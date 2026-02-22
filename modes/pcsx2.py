@@ -30,7 +30,7 @@ class Pcsx2Logic(BaseLogic):
         # 1. 値の補正
         cur_p = raw_p
         cur_b = 0
-        if raw_b == 9: cur_b = max_brake + 1
+        if raw_b == 14: cur_b = max_brake + 1
         elif raw_b == 0: cur_b = 0
         else:
             if is_midosuji and raw_b > max_brake: cur_b = max_brake
