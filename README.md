@@ -153,7 +153,7 @@ JRETSおよびBVEでのみ使用する場合は無視して構いません。
 ※START, SELECTボタはコントローラ側のボタンを押して割り当てること
 
 > [!IMPORTANT]
-> **STARTボタンについて** > `Configre Binding` の `Sensitivity` の値を0.6以下に設定してください。  
+> **STARTボタンについて** > `Configre Binding` の `Sensitivity` の値を0.4以下に設定してください。  
 > SELECTボタンを押した際には普通の警笛、キーボードのEnterキーを押した場合に非常警笛を吹笛します。
 
 ### RPCS3 の設定例
