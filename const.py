@@ -3,7 +3,6 @@ import pygame
 
 # --- 動作設定 (秒) ---
 N_WAIT_TIME = 0.02        # ← 追加: N位置に戻る際のチャタリング防止待機時間
-CONFIRM_WAIT_TIME = 0.02  # ← 追加: ノッチ確定までの待機時間
 KEY_REPEAT_DELAY = 0.02
 
 # ★PCSX2/RPCS3モード専用設定 (秒)

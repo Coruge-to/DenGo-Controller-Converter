@@ -1,7 +1,7 @@
 # inputs.py
 import time
 import pygame
-from const import N_WAIT_TIME, CONFIRM_WAIT_TIME
+from const import N_WAIT_TIME
 
 class StableNotchReader:
     """ノッチ入力のチャタリングを防ぎ、値が安定するまで待つクラス"""
@@ -16,15 +16,13 @@ class StableNotchReader:
         if raw_val == -1:
             return self.confirmed
         
-        # N位置(0)に戻る時は少し長めに待つ(誤検知防止)、それ以外は短く
-        limit = N_WAIT_TIME if raw_val == 0 else CONFIRM_WAIT_TIME
-        
+        # N位置(0)に戻る時は少し長めに待つ(誤検知防止)、それ以外は短く    
         if raw_val != self.last_raw:
             self.start_time = now
             self.last_raw = raw_val
             return self.confirmed
         
-        if (now - self.start_time) > limit:
+        if (now - self.start_time) > N_WAIT_TIME:
             self.confirmed = raw_val
             return raw_val
         
