@@ -74,7 +74,9 @@ PCゲームである JRETS や BVE では、ゲーム内のキー設定がデフ
 | 切 (N) に戻す | `S` | 一発でN(ノッチオフ) |
 | ブレーキ操作 | `.` / `,` / `M` | ブレーキを強める / 弱める / 一発でN(緩解) |
 | 非常ブレーキ | `/` | 一発でEB(非常ブレーキ) |
-| SELECT / START | `Enter` / `Backspace`| 電笛 / 空笛 |
+| SELECT | `Enter` | 電笛  |
+| START | `Backspace` | 空笛(JRETSモード時) |
+| START | `+` | 空笛(BVEモード時) |
 
 ---
 
@@ -104,7 +106,7 @@ JRETSおよびBVEでのみ使用する場合は無視して構いません。
 | `.` | Cross(✕) | ブレーキを強める(2ハンドルモード時)(御堂筋線モードでは反転し、","を送信) |
 | `,` | Square(☐) | ブレーキを弱める(2ハンドルモード時)(御堂筋線モードでは反転し、"."を送信) |
 | `/` | Circle(◯) | 一発でEB(非常ブレーキ)(PCSX2モードのみ)(※787系モードを除く) |
-| `SELECT` | Triangle(△)半押し | 通常警笛(※RPCS3モード時は京阪8000系モードを除いて全押し) |
+| `SELECT` | Triangle(△)半押し | 通常警笛(※RPCS3モーでは京阪8000系モード時を除いて全押し) |
 | `START` | START | START |
 
 ---
@@ -119,8 +121,8 @@ JRETSおよびBVEでのみ使用する場合は無視して構いません。
 | `W` | Select | ワイパー動作(RPCS3モード時) |
 | `Y` / `H` | L-Stick Up / Down | 視点変更など(Uで運転台を拡大/Jで運転台を縮小)(RPCS3モード時) |
 | `U` / `J` | R-Stick Up / Down | 視点変更など(Uで運転台の位置を上げる/Jで運転台の位置を下げる) |
-| `Enter` | Triangle(△)全押し | 非常警笛(RPCS3モード時) |
-| `Backspace` | Triangle(△)全押し | 非常警笛(PCSX2モード時) |
+| `Enter` | Triangle(△)全押し | 非常警笛 |
+| `Backspace` | START | START |
 | `矢印キー↓` | L1 | L1 |
 | `矢印キー↑` | L2 | L2 |
 | `矢印キー←` | R1 | R1 |
@@ -146,8 +148,12 @@ JRETSおよびBVEでのみ使用する場合は無視して構いません。
 
 ### PCSX2 の設定例 (LilyPad 等)
 ![PCSX2 Key Config](docs/pcsx2_settings.png)  
-※黄色で塗られているものは設定必須
-※STARTボタンのみコントローラ側のボタンを押して割り当てること
+※黄色で塗られているものは設定必須  
+※START, SELECTボタはコントローラ側のボタンを押して割り当てること
+
+> [!IMPORTANT]
+> **STARTボタンについて** > `Configre Binding` の `Sensitivity` の値を0.65以下に設定してください。  
+> SELECTボタンを押した際には普通の警笛、キーボードのEnterキーを押した場合に非常警笛を吹笛します。
 
 ### RPCS3 の設定例
 ![RPCS3 Key Config](docs/rpcs3_settings.png)
@@ -155,7 +161,7 @@ JRETSおよびBVEでのみ使用する場合は無視して構いません。
 
 > [!IMPORTANT]
 > **RPCS3の京阪8000系モードについて** > `Pressure Sensitivity Mode` のキーに **`E`** を割り当ててください。  
-> SELECTボタンを押した際には普通の警笛、Enterキーを押した場合に非常警笛を吹笛します。
+> SELECTボタンを押した際には普通の警笛、キーボードのEnterキーを押した場合に非常警笛を吹笛します。
 
 ## 免責事項 / Disclaimer
 

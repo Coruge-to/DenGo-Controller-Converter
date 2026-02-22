@@ -119,7 +119,7 @@ class BveLogic(BaseLogic):
 
         is_st, is_sl = (raw_btns[9]==1), (raw_btns[10]==1)
         if is_st != self.p_start: 
-            pydirectinput.keyDown(KEY_START) if is_st else pydirectinput.keyUp(KEY_START)
+            pydirectinput.keyDown(KEY_START_BVE) if is_st else pydirectinput.keyUp(KEY_START_BVE)
             self.p_start = is_st
         if is_sl != self.p_select: 
             pydirectinput.keyDown(KEY_SELECT) if is_sl else pydirectinput.keyUp(KEY_SELECT)

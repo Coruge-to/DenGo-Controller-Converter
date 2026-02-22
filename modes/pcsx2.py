@@ -80,7 +80,6 @@ class Pcsx2Logic(BaseLogic):
                         for _ in range(diff): self.press_emu(KEY_PCSX2_POWER_INC)
                     pydirectinput.keyDown(KEY_PCSX2_POWER_INC)
                     self.prev_axis = 5
-                self._handle_buttons(raw_btns)
                 return
 
         # ---------------------------------------------------------
@@ -130,14 +129,3 @@ class Pcsx2Logic(BaseLogic):
                             for _ in range(abs(diff)): self.press_emu(B_INC)
             
             self.prev_axis = cur_axis
-        
-        self._handle_buttons(raw_btns)
-
-    def _handle_buttons(self, raw_btns):
-        is_st, is_sl = (raw_btns[9]==1), (raw_btns[10]==1)
-        if is_sl != self.p_select:
-            pydirectinput.keyDown(KEY_PCSX2_HORN1) if is_sl else pydirectinput.keyUp(KEY_PCSX2_HORN1)
-            self.p_select = is_sl
-        if is_st != self.p_start:
-            pydirectinput.keyDown(KEY_PCSX2_HORN2) if is_st else pydirectinput.keyUp(KEY_PCSX2_HORN2)
-            self.p_start = is_st

@@ -57,7 +57,8 @@ COLOR_HOLE = (20, 20, 20)
 # --- キーアサイン (JRETS/BVE) ---
 KEY_MASCON_UP, KEY_MASCON_DOWN, KEY_MASCON_N = 'z', 'a', 's'
 KEY_BRAKE_N, KEY_BRAKE_UP, KEY_BRAKE_DOWN, KEY_BRAKE_EMG = 'm', '.', ',', '/'
-KEY_START, KEY_SELECT = 'backspace', 'enter'
+KEY_START, KEY_SELECT, KEY_START_BVE = 'backspace', 'enter',  'add'
+
 
 # --- キーアサイン (PCSX2/RPCS3) ---
 KEY_PCSX2_POWER_INC = 'z' # マスコン増 / ハンドル奥へ
@@ -66,8 +67,8 @@ KEY_PCSX2_BRAKE_INC = '.' # ツーハン ブレーキ増 (通常)
 KEY_PCSX2_BRAKE_DEC = ',' # ツーハン ブレーキ減 (通常)
 KEY_PCSX2_N         = 's' # マスコン切 (N) ショートカット
 KEY_PCSX2_EMG       = '/' # 非常ブレーキ (PCSX2専用)
-KEY_PCSX2_HORN1     = 'enter'     # 電笛 (SELECT)
-KEY_PCSX2_HORN2     = 'backspace' # 空笛 (START)
+KEY_PCSX2_HORN1     = 'enter'     # SELECT
+KEY_PCSX2_HORN2     = 'backspace' # START
 
 # --- 定数マップ ---
 # 電気指令式 => 構成 : 緩解, 常用13段, 非常
