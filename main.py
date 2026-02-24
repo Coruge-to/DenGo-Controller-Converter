@@ -76,6 +76,7 @@ def toggle_brake_mode(*args):
         brake_mode = "1"
     else:
         brake_mode = "2" if brake_mode == "1" else "1"
+    logics[game_mode].reset()
 
 def toggle_yokusoku(*args):
     global yokusoku_mode

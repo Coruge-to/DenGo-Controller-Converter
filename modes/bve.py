@@ -1,5 +1,4 @@
 # modes/bve.py
-import time
 import pydirectinput
 from const import *
 from .base import BaseLogic
@@ -18,13 +17,14 @@ class BveLogic(BaseLogic):
         max_brake = context['max_brake']
 
         cur_p = raw_p
+        cur_b = 0
         if brake_mode == "1":
             if raw_b == 14: cur_b = max_brake + 1
             elif raw_b == 0: cur_b = 0
             else: cur_b = min(raw_b, max_brake)
         else:
             cur_b = raw_b
-
+            
         # --- ★追加: 初回同期処理 ---
         if self.needs_sync:
             self.prev_p = cur_p
@@ -45,14 +45,12 @@ class BveLogic(BaseLogic):
                     diff = target_state - self.auto_state
                     for _ in range(abs(diff)):
                         pydirectinput.press(KEY_BRAKE_DOWN)
-                        time.sleep(KEY_REPEAT_DELAY)
                     self.auto_state = 0
             
             if brake_mode == "1" and self.prev_b > 0:
                 steps_to_release = self.prev_b
                 for _ in range(steps_to_release):
                     pydirectinput.press(KEY_BRAKE_DOWN)
-                    time.sleep(KEY_REPEAT_DELAY)
                 self.prev_b = 0
 
             if cur_p != self.prev_p:
@@ -60,11 +58,9 @@ class BveLogic(BaseLogic):
                 if diff > 0:
                     for _ in range(diff): 
                         pydirectinput.press(KEY_MASCON_UP)
-                        time.sleep(KEY_REPEAT_DELAY)
                 elif diff < 0:
                     for _ in range(abs(diff)): 
                         pydirectinput.press(KEY_MASCON_DOWN)
-                        time.sleep(KEY_REPEAT_DELAY)
                 self.prev_p = cur_p
 
         else:
@@ -72,7 +68,6 @@ class BveLogic(BaseLogic):
                 diff = 0 - self.prev_p
                 for _ in range(abs(diff)): 
                     pydirectinput.press(KEY_MASCON_DOWN)
-                    time.sleep(KEY_REPEAT_DELAY)
                 self.prev_p = 0
             
             if brake_mode == "2":
@@ -91,11 +86,9 @@ class BveLogic(BaseLogic):
                         if diff > 0: 
                              for _ in range(diff): 
                                  pydirectinput.press(KEY_BRAKE_UP)
-                                 time.sleep(KEY_REPEAT_DELAY)
                         elif diff < 0: 
                              for _ in range(abs(diff)): 
                                  pydirectinput.press(KEY_BRAKE_DOWN)
-                                 time.sleep(KEY_REPEAT_DELAY)
                         self.auto_state = target_state
             
             else:
@@ -108,13 +101,11 @@ class BveLogic(BaseLogic):
                         diff = cur_b - self.prev_b
                         for _ in range(abs(diff)):
                             pydirectinput.press(KEY_BRAKE_DOWN)
-                            time.sleep(KEY_REPEAT_DELAY)
                     else:
                         diff = cur_b - self.prev_b
                         key = KEY_BRAKE_UP if diff > 0 else KEY_BRAKE_DOWN
                         for _ in range(abs(diff)):
                             pydirectinput.press(key)
-                            time.sleep(KEY_REPEAT_DELAY)
                     self.prev_b = cur_b
 
         is_st, is_sl = (raw_btns[9]==1), (raw_btns[10]==1)

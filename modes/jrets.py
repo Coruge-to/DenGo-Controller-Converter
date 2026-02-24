@@ -1,5 +1,4 @@
 # modes/jrets.py
-import time
 import pydirectinput
 from const import *
 from .base import BaseLogic
@@ -63,7 +62,6 @@ class JretsLogic(BaseLogic):
                     key = KEY_MASCON_UP if diff > 0 else KEY_MASCON_DOWN
                     for _ in range(abs(diff)):
                         pydirectinput.press(key)
-                        time.sleep(KEY_REPEAT_DELAY)
                 self.prev_p = cur_p
         else:
             if self.prev_p != 0:
@@ -88,7 +86,6 @@ class JretsLogic(BaseLogic):
                     key = KEY_BRAKE_UP if diff > 0 else KEY_BRAKE_DOWN
                     for _ in range(abs(diff)):
                         pydirectinput.press(key)
-                        time.sleep(KEY_REPEAT_DELAY)
                 self.prev_b = cur_b
 
         is_st, is_sl = (raw_btns[9]==1), (raw_btns[10]==1)
