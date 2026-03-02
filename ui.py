@@ -187,16 +187,16 @@ def draw_auto_brake_unit(surface, center_x, center_y, current_val):
     overlap_angle = 10
     
     col_run = COLOR_N if current_val == 0 else COLOR_OFF_FILL
-    col_svc = COLOR_B_SVC if current_val == 8 else COLOR_OFF_FILL
+    col_svc = COLOR_B_SVC if current_val == 2 else COLOR_OFF_FILL
     
     draw_solid_arc(surface, col_run, center, r_inner, r_outer, 200, 270 + overlap_angle)
-    draw_solid_arc(surface, col_svc, center, r_inner, r_outer, 270 - overlap_angle, 380)
+    draw_solid_arc(surface, col_svc, center, r_inner, r_outer, 270 - overlap_angle, 360)
     
-    angles = { 0: 200, 1: 270, 2: 330, 3: 20 }
+    angles = { 0: 200, 1: 270, 2: 315, 3: 0 }
     target_angle = angles.get(current_val, 200)
     
     labels = [(0, "運転", 200, COLOR_N), (1, "重なり", 270, COLOR_B_SVC), 
-              (2, "常用", 330, COLOR_B_SVC), (3, "非常", 20, COLOR_B_EMG)]
+              (2, "常用", 315, COLOR_B_SVC), (3, "非常", 0, COLOR_B_EMG)]
     
     for val, text, ang, act_color in labels:
         lx = center[0] + label_radius * math.cos(math.radians(ang))
