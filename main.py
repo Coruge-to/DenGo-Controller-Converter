@@ -160,7 +160,7 @@ def get_dynamic_height(game_mode, brake_mode, max_power, max_brake):
     is_real_auto_air = (game_mode in ["JRETS", "BVE"] and brake_mode == "2")
     if is_real_auto_air:
         # 自動空気ブレーキ: 中心(250) + アーム長(180) + ラベル円(40)
-        b_height = 193 + 180 + 40
+        b_height = 420
     else:
         # 電気指令式: N + B1〜Bmax + EB
         b_height = gauge_start_y + (max_brake + 2) * (box_h + spacing)
