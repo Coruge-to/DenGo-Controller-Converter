@@ -14,6 +14,7 @@ from modes.jrets import JretsLogic
 from modes.bve import BveLogic
 from modes.pcsx2 import Pcsx2Logic
 from modes.rpcs3 import Rpcs3Logic
+from modes.running_train import RunningLogic
 
 try:
     myappid = 'my.dengo.converter.v21.ux_improved'
@@ -39,7 +40,8 @@ logics = {
     "JRETS": JretsLogic(),
     "BVE": BveLogic(),
     "PCSX2": Pcsx2Logic(),
-    "RPCS3": Rpcs3Logic()
+    "RPCS3": Rpcs3Logic(),
+    "RUNNING": RunningLogic()
 }
 
 def force_reset_state(*args):
@@ -48,7 +50,7 @@ def force_reset_state(*args):
 
 def toggle_game_mode(mouse_btn=1, *args):
     global game_mode, max_power, max_brake, brake_mode, midosuji_mode, ae100_mode, keihan_mode, mode_787, yokusoku_mode
-    modes = ["JRETS", "BVE", "PCSX2", "RPCS3"]
+    modes = ["JRETS", "BVE", "PCSX2", "RPCS3", "RUNNING"]
     idx = modes.index(game_mode)
     next_idx = (idx + 1) % len(modes) if mouse_btn == 1 else (idx - 1) % len(modes)
     game_mode = modes[next_idx]
@@ -157,7 +159,7 @@ def get_dynamic_height(game_mode, brake_mode, max_power, max_brake):
     p_height = gauge_start_y + (max_power + 1) * (box_h + spacing)
 
     # ブレーキ側
-    is_real_auto_air = (game_mode in ["JRETS", "BVE"] and brake_mode == "2")
+    is_real_auto_air = (game_mode in ["JRETS", "BVE", "RUNNING"] and brake_mode == "2")
     if is_real_auto_air:
         # 自動空気ブレーキ: 中心(250) + アーム長(180) + ラベル円(40)
         b_height = 420
@@ -241,18 +243,25 @@ def main():
         btn_yokusoku.visible = (game_mode in ["JRETS", "BVE"]) and (brake_mode == "1")
 
         is_special = (midosuji_mode or ae100_mode or keihan_mode or mode_787)
-        is_real_auto_air = (game_mode in ["JRETS", "BVE"] and brake_mode == "2")
+        is_real_auto_air = (game_mode in ["JRETS", "BVE", "RUNNING"] and brake_mode == "2")
 
         btns_cfg[0].visible = not is_special
         btns_cfg[1].visible = not is_special
         btns_cfg[2].visible = not is_special and not is_real_auto_air
         btns_cfg[3].visible = not is_special and not is_real_auto_air
 
-        btn_game_mode.text = game_mode
-        if game_mode == "JRETS": btn_game_mode.base_color = COLOR_N
-        elif game_mode == "BVE": btn_game_mode.base_color = COLOR_B_SVC
-        elif game_mode == "PCSX2": btn_game_mode.base_color = COLOR_P
-        elif game_mode == "RPCS3": btn_game_mode.base_color = COLOR_RPCS3_BTN
+        if game_mode == "RUNNING":
+            btn_game_mode.text = "RUNNING\nTRAIN"
+            btn_game_mode.font_key = 'ui_bold_s' # ★小さいフォントを適用
+            btn_game_mode.base_color = COLOR_RUNNING
+        else:
+            btn_game_mode.text = game_mode
+            btn_game_mode.font_key = 'ui_bold'   # ★他のモードは通常の大きさに戻す
+            
+            if game_mode == "JRETS": btn_game_mode.base_color = COLOR_N
+            elif game_mode == "BVE": btn_game_mode.base_color = COLOR_B_SVC
+            elif game_mode == "PCSX2": btn_game_mode.base_color = COLOR_P
+            elif game_mode == "RPCS3": btn_game_mode.base_color = COLOR_RPCS3_BTN
 
         if midosuji_mode: btn_midosuji.text = "反転"; btn_midosuji.base_color = COLOR_MIDOSUJI
         else: btn_midosuji.text = "通常"; btn_midosuji.base_color = COLOR_NORMAL_BTN

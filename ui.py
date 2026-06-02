@@ -10,6 +10,7 @@ def init_fonts():
     """main.pyでpygame.init()した後に呼ぶ"""
     fonts['ui_label'] = pygame.font.SysFont("meiryo", 18, bold=True)
     fonts['ui_bold'] = pygame.font.SysFont("meiryo", 20, bold=True)
+    fonts['ui_bold_s'] = pygame.font.SysFont("meiryo", 15, bold=True)
     fonts['keihan_bold'] = pygame.font.SysFont("meiryo", 20, bold=True)
     fonts['header_title'] = pygame.font.SysFont("meiryo", 26, bold=True)
     fonts['midosuji_title'] = pygame.font.SysFont("meiryo", 25, bold=True)
@@ -40,8 +41,29 @@ class Button:
             pygame.draw.rect(surface, (100, 100, 100), self.rect, 1, border_radius=4)
         
         font = fonts.get(self.font_key, fonts['ui_bold'])
-        txt_surf = font.render(self.text, True, COLOR_TEXT)
-        surface.blit(txt_surf, txt_surf.get_rect(center=self.rect.center))
+        
+        # --- ★修正: 複数行(\n)のセンタリング描画に対応 ---
+        lines = self.text.split('\n')
+        
+        if len(lines) == 1:
+            # 1行のボタン（従来通り）
+            txt_surf = font.render(self.text, True, COLOR_TEXT)
+            surface.blit(txt_surf, txt_surf.get_rect(center=self.rect.center))
+            
+        else:
+            # 2行のボタン（走ル列車！用）
+            line_spacing = -7 # 行間を少し詰める
+            total_height = sum([font.size(line)[1] for line in lines])
+            total_height += line_spacing * (len(lines) - 1)
+            
+            # ★ ここで「+1」して、全体の描画開始位置を1px下に落としています
+            current_y = self.rect.centery - (total_height // 2) + 1 
+            
+            for line in lines:
+                txt_surf = font.render(line, True, COLOR_TEXT)
+                r = txt_surf.get_rect(center=(self.rect.centerx, current_y + txt_surf.get_height() // 2))
+                surface.blit(txt_surf, r)
+                current_y += txt_surf.get_height() + line_spacing
 
     def handle_event(self, event):
         if not self.visible: 
