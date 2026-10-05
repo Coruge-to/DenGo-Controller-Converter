@@ -8,6 +8,17 @@ INVALID_HANDLE_VALUE=ctypes.c_void_p(-1).value
 TARGET_NAMES={"bvets.exe","pcsx2.exe","pcsx2-qt.exe","rpcs3.exe","jreast_trainsimulator.exe","runningtrain-win64-shipping.exe"}
 kernel32=ctypes.windll.kernel32
 user32=ctypes.windll.user32
+kernel32.OpenProcess.argtypes=[wintypes.DWORD,wintypes.BOOL,wintypes.DWORD]
+kernel32.OpenProcess.restype=wintypes.HANDLE
+kernel32.CloseHandle.argtypes=[wintypes.HANDLE]
+kernel32.CloseHandle.restype=wintypes.BOOL
+kernel32.QueryFullProcessImageNameW.argtypes=[wintypes.HANDLE,wintypes.DWORD,wintypes.LPWSTR,ctypes.POINTER(wintypes.DWORD)]
+kernel32.QueryFullProcessImageNameW.restype=wintypes.BOOL
+if hasattr(kernel32,"IsWow64Process2"):
+ kernel32.IsWow64Process2.argtypes=[wintypes.HANDLE,ctypes.POINTER(ctypes.c_ushort),ctypes.POINTER(ctypes.c_ushort)]
+ kernel32.IsWow64Process2.restype=wintypes.BOOL
+kernel32.IsWow64Process.argtypes=[wintypes.HANDLE,ctypes.POINTER(wintypes.BOOL)]
+kernel32.IsWow64Process.restype=wintypes.BOOL
 class PROCESSENTRY32W(ctypes.Structure):
  _fields_=[("dwSize",wintypes.DWORD),("cntUsage",wintypes.DWORD),("th32ProcessID",wintypes.DWORD),("th32DefaultHeapID",ctypes.c_size_t),("th32ModuleID",wintypes.DWORD),("cntThreads",wintypes.DWORD),("th32ParentProcessID",wintypes.DWORD),("pcPriClassBase",wintypes.LONG),("dwFlags",wintypes.DWORD),("szExeFile",wintypes.WCHAR*260)]
 @dataclass(frozen=True)
@@ -40,11 +51,30 @@ def _windows(pids):
   if p not in pids:return True
   n=user32.GetWindowTextLengthW(hwnd);tb=ctypes.create_unicode_buffer(n+1);user32.GetWindowTextW(hwnd,tb,n+1);c=ctypes.create_unicode_buffer(256);user32.GetClassNameW(hwnd,c,256);r.setdefault(p,[]).append((tb.value,c.value));return True
  user32.EnumWindows(T(cb),0);return r
-def _classify(n,path,ws):
- n=n.lower();path=path.lower()
+def _architecture(pid):
+ h=kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,False,pid)
+ if not h:return None
+ try:
+  fn=getattr(kernel32,"IsWow64Process2",None)
+  if fn:
+   process_machine=ctypes.c_ushort(0)
+   native_machine=ctypes.c_ushort(0)
+   if fn(h,ctypes.byref(process_machine),ctypes.byref(native_machine)):
+    if process_machine.value==0x014C:return "x86"
+    if process_machine.value==0 and native_machine.value in (0x8664,0xAA64):return "x64"
+  wow64=wintypes.BOOL()
+  if kernel32.IsWow64Process(h,ctypes.byref(wow64)):
+   if wow64.value:return "x86"
+   return "x64" if ctypes.sizeof(ctypes.c_void_p)==8 else None
+  return None
+ finally:kernel32.CloseHandle(h)
+def _classify(pid,n,path,ws):
+ n=n.lower()
  if n=="bvets.exe":
-  if "\\mackoy\\bvets5\\bvets.exe" in path:return "bve5"
-  if "\\mackoy\\bvets6\\bvets.exe" in path:return "bve6"
+  architecture=_architecture(pid)
+  if architecture=="x86":return "bve5"
+  if architecture=="x64":return "bve6"
+  return None
  if n in ("pcsx2.exe","pcsx2-qt.exe"):return "pcsx2"
  if n=="rpcs3.exe":return "rpcs3"
  if n=="jreast_trainsimulator.exe":return "jrets"
@@ -54,7 +84,7 @@ def _scan(ps):
  for pid,n in ps:
   ws=w.get(pid,[])
   if not ws:u=True;continue
-  q=_classify(n,_path(pid),ws)
+  q=_classify(pid,n,_path(pid),ws)
   if q:f[q].append((pid,tuple(t for t,_ in ws if t)))
  return tuple(PlatformStatus(p,l,bool(f[p]),tuple(e[0] for e in f[p]),tuple(t for e in f[p] for t in e[1])) for p,l in PLATFORMS),u
 class EfficientPlatformDetector:
