@@ -111,8 +111,8 @@ class RunningLogic(BaseLogic):
 
         is_st, is_sl = (raw_btns[9]==1), (raw_btns[10]==1)
         if is_st != self.p_start: 
-            pydirectinput.keyDown('h') if is_st else pydirectinput.keyUp('h')
+            pydirectinput.keyDown('space') if is_st else pydirectinput.keyUp('space')
             self.p_start = is_st
         if is_sl != self.p_select: 
-            pydirectinput.keyDown('space') if is_sl else pydirectinput.keyUp('space')
+            pydirectinput.keyDown('h') if is_sl else pydirectinput.keyUp('h')
             self.p_select = is_sl
