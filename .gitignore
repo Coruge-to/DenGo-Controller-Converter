@@ -13,3 +13,13 @@ __pycache__/
 
 *.zip
 DenGo-Controller-Converter/
+
+
+# BVE integration local build artifacts
+bve_integration/**/bin/
+bve_integration/**/obj/
+bve_integration/**/*.dll
+bve_integration/**/*.pdb
+bve_integration/local_references/
+**/__pycache__/
+*.pyc

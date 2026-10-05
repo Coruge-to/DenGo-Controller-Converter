@@ -9,11 +9,14 @@ from typing import Optional
 MAPPING_NAME = r"Local\CorugeTo.DenGo.VehicleSpec.v1"
 MAPPING_SIZE = 64
 MAGIC = 0x44564753
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 SNAPSHOT_FORMAT = "<9iqiqii"
 MAX_AGE_SECONDS = 1.0
 BRAKE_SYSTEMS = {1: "Cl", 2: "Smee", 3: "Ecb"}
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+SYNCHRONIZE = 0x00100000
+WAIT_OBJECT_0 = 0x00000000
+CONTROL_EVENT_PREFIX = r"Local\CorugeTo.DenGo.VehicleSpec.Control.v1."
 CONTROLLER_MAX_POWER_NOTCH = 5
 CONTROLLER_MAX_BRAKE_NOTCH = 13
 
@@ -36,6 +39,8 @@ class BveVehicleSpecReceiver:
         self._memory = None
         self._last_valid_spec = None
         self._last_writer_process_id = None
+        self._last_caller_enabled = None
+        self._minimum_fresh_utc_ticks = None
 
     def close(self):
         if self._memory is not None:
@@ -45,6 +50,8 @@ class BveVehicleSpecReceiver:
                 self._memory = None
         self._last_valid_spec = None
         self._last_writer_process_id = None
+        self._last_caller_enabled = None
+        self._minimum_fresh_utc_ticks = None
 
     def __enter__(self):
         return self
@@ -95,7 +102,7 @@ class BveVehicleSpecReceiver:
             updated_utc_ticks,
             writer_process_id,
             _reserved_64,
-            _reserved_32,
+            source_enabled,
             _sequence_end,
         ) = values
 
@@ -109,7 +116,33 @@ class BveVehicleSpecReceiver:
 
         if not self._is_process_alive(writer_process_id):
             self._clear_cache()
+            self._last_caller_enabled = None
+            self._minimum_fresh_utc_ticks = None
             return None
+
+        caller_enabled = self._is_control_event_set(writer_process_id, "Enabled")
+        if not caller_enabled:
+            self._clear_cache()
+            self._last_caller_enabled = False
+            self._minimum_fresh_utc_ticks = self._current_utc_ticks()
+            return None
+
+        if self._last_caller_enabled is False:
+            self._minimum_fresh_utc_ticks = self._current_utc_ticks()
+        self._last_caller_enabled = True
+
+        if not self._is_control_event_set(writer_process_id, "Ready"):
+            return None
+
+        if not source_enabled:
+            return None
+
+        if (
+            self._minimum_fresh_utc_ticks is not None
+            and updated_utc_ticks <= self._minimum_fresh_utc_ticks
+        ):
+            return None
+        self._minimum_fresh_utc_ticks = None
 
         age_seconds = self._calculate_age_seconds(updated_utc_ticks)
         if not source_valid:
@@ -174,6 +207,23 @@ class BveVehicleSpecReceiver:
             return False
         ctypes.windll.kernel32.CloseHandle(handle)
         return True
+
+    @staticmethod
+    def _is_control_event_set(process_id, suffix):
+        if not process_id or process_id <= 0:
+            return False
+        event_name = CONTROL_EVENT_PREFIX + str(process_id) + "." + suffix
+        handle = ctypes.windll.kernel32.OpenEventW(SYNCHRONIZE, False, event_name)
+        if not handle:
+            return False
+        try:
+            return ctypes.windll.kernel32.WaitForSingleObject(handle, 0) == WAIT_OBJECT_0
+        finally:
+            ctypes.windll.kernel32.CloseHandle(handle)
+
+    @staticmethod
+    def _current_utc_ticks():
+        return int(time.time() * 10000000.0) + 621355968000000000
 
     @staticmethod
     def _calculate_age_seconds(updated_utc_ticks):
