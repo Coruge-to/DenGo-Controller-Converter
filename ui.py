@@ -1,4 +1,4 @@
-﻿# ui.py
+# ui.py
 import pygame
 import math
 from const import *
@@ -10,7 +10,10 @@ def init_fonts():
     """main.pyでpygame.init()した後に呼ぶ"""
     fonts['ui_label'] = pygame.font.SysFont("meiryo", 18, bold=True)
     fonts['ui_bold'] = pygame.font.SysFont("meiryo", 20, bold=True)
-    fonts['ui_bold_s'] = pygame.font.SysFont("meiryo", 15, bold=True)
+    fonts['ui_bold_s']=pygame.font.SysFont("meiryo",15,bold=True)
+    fonts['platform']=pygame.font.SysFont("meiryo",15,bold=True)
+    fonts['gate_title']=pygame.font.SysFont("meiryo",28,bold=True)
+    fonts['gate_body']=pygame.font.SysFont("meiryo",18,bold=True)
     fonts['keihan_bold'] = pygame.font.SysFont("meiryo", 20, bold=True)
     fonts['header_title'] = pygame.font.SysFont("meiryo", 26, bold=True)
     fonts['midosuji_title'] = pygame.font.SysFont("meiryo", 25, bold=True)
@@ -334,3 +337,20 @@ def draw_header_title(surface, game_mode, brake_mode, midosuji_mode, ae100_mode,
     
     surface.blit(lbl_mode_title, rect_title)
     surface.blit(lbl_mode_val, rect_val)
+
+
+def _outlined(surface,text,font,center):
+ o=font.render(text,True,(0,0,0));x,y=center
+ for dx,dy in ((-2,0),(2,0),(0,-2),(0,2),(-2,-2),(-2,2),(2,-2),(2,2)):surface.blit(o,o.get_rect(center=(x+dx,y+dy)))
+ r=font.render(text,True,COLOR_TEXT);surface.blit(r,r.get_rect(center=center))
+def draw_platform_gate_screen(surface,statuses,count):
+ surface.fill(COLOR_BG)
+ title,body,heading=("対応ソフトが起動していません","使用するソフトを1つ起動してください","対応ソフト") if count==0 else ("複数の対応ソフトが起動しています","使用するソフトを1つだけ残し、他のソフトを閉じてください","起動中のソフト")
+ th,bh,hh=fonts['gate_title'].get_height(),fonts['gate_body'].get_height(),fonts['ui_bold_s'].get_height();g1,g2,g3,button=22,28,12,40;total=th+g1+bh+g2+hh+g3+button;top=(surface.get_height()-total)//2
+ ty=top+th//2;by=top+th+g1+bh//2;hy=top+th+g1+bh+g2+hh//2;y=top+th+g1+bh+g2+hh+g3
+ _outlined(surface,title,fonts['gate_title'],(surface.get_width()//2,ty));_outlined(surface,body,fonts['gate_body'],(surface.get_width()//2,by));_outlined(surface,heading,fonts['ui_bold_s'],(surface.get_width()//2,hy))
+ colors={"jrets":COLOR_N,"bve5":COLOR_B_SVC,"bve6":COLOR_B_SVC,"pcsx2":COLOR_P,"rpcs3":COLOR_RPCS3_BTN,"running_train":COLOR_RUNNING};w,gap=100,10;start=(surface.get_width()-(w*len(statuses)+gap*(len(statuses)-1)))//2
+ for i,s in enumerate(statuses):
+  rect=pygame.Rect(start+i*(w+gap),y,w,button);active=count==0 or s.running;pygame.draw.rect(surface,colors.get(s.platform_id,COLOR_NORMAL_BTN) if active else COLOR_OFF_FILL,rect,border_radius=4);pygame.draw.rect(surface,(90,90,90),rect,1,border_radius=4);color=COLOR_TEXT if active else COLOR_TEXT_DIM;lines=[s.display_name] if s.display_name!="RUNNING TRAIN" else ["RUNNING","TRAIN"]
+  for j,line in enumerate(lines):
+   r=fonts['platform'].render(line,True,color);surface.blit(r,r.get_rect(center=(rect.centerx,rect.centery if len(lines)==1 else rect.centery-7+j*14)))

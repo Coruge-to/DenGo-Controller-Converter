@@ -1,5 +1,4 @@
-﻿import ctypes
-import mmap
+import ctypes
 import struct
 import time
 from dataclasses import dataclass
@@ -14,11 +13,21 @@ SNAPSHOT_FORMAT = "<9iqiqii"
 MAX_AGE_SECONDS = 1.0
 BRAKE_SYSTEMS = {1: "Cl", 2: "Smee", 3: "Ecb"}
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+FILE_MAP_READ = 0x0004
 SYNCHRONIZE = 0x00100000
 WAIT_OBJECT_0 = 0x00000000
 CONTROL_EVENT_PREFIX = r"Local\CorugeTo.DenGo.VehicleSpec.Control.v1."
 CONTROLLER_MAX_POWER_NOTCH = 5
 CONTROLLER_MAX_BRAKE_NOTCH = 13
+kernel32 = ctypes.windll.kernel32
+kernel32.OpenFileMappingW.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_wchar_p]
+kernel32.OpenFileMappingW.restype = ctypes.c_void_p
+kernel32.MapViewOfFile.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_size_t]
+kernel32.MapViewOfFile.restype = ctypes.c_void_p
+kernel32.UnmapViewOfFile.argtypes = [ctypes.c_void_p]
+kernel32.UnmapViewOfFile.restype = ctypes.c_int
+kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+kernel32.CloseHandle.restype = ctypes.c_int
 
 
 @dataclass(frozen=True)
@@ -36,20 +45,28 @@ class BveVehicleSpec:
 class BveVehicleSpecReceiver:
     def __init__(self, max_age_seconds=MAX_AGE_SECONDS):
         self.max_age_seconds = float(max_age_seconds)
-        self._memory = None
+        self._mapping_handle = None
+        self._view_pointer = None
         self._last_valid_spec = None
         self._last_writer_process_id = None
         self._last_caller_enabled = None
         self._minimum_fresh_utc_ticks = None
 
     def close(self):
-        if self._memory is not None:
-            try:
-                self._memory.close()
-            finally:
-                self._memory = None
+        self.disconnect()
         self._last_valid_spec = None
         self._last_writer_process_id = None
+        self._last_caller_enabled = None
+        self._minimum_fresh_utc_ticks = None
+
+    def disconnect(self):
+        if self._view_pointer:
+            kernel32.UnmapViewOfFile(ctypes.c_void_p(self._view_pointer))
+            self._view_pointer = None
+        if self._mapping_handle:
+            kernel32.CloseHandle(ctypes.c_void_p(self._mapping_handle))
+            self._mapping_handle = None
+        self._clear_cache()
         self._last_caller_enabled = None
         self._minimum_fresh_utc_ticks = None
 
@@ -60,18 +77,18 @@ class BveVehicleSpecReceiver:
         self.close()
 
     def _open_if_needed(self):
-        if self._memory is None:
-            self._memory = mmap.mmap(
-                -1,
-                MAPPING_SIZE,
-                tagname=MAPPING_NAME,
-                access=mmap.ACCESS_READ,
-            )
-
+        if self._view_pointer: return True
+        h=kernel32.OpenFileMappingW(FILE_MAP_READ, False, MAPPING_NAME)
+        if not h:return False
+        p=kernel32.MapViewOfFile(ctypes.c_void_p(h), FILE_MAP_READ, 0, 0, MAPPING_SIZE)
+        if not p:
+            kernel32.CloseHandle(ctypes.c_void_p(h))
+            return False
+        self._mapping_handle=h;self._view_pointer=p;return True
     def _read_consistent_values(self):
-        self._open_if_needed()
+        if not self._open_if_needed(): return None
         for _ in range(4):
-            raw = self._memory[:MAPPING_SIZE]
+            raw=ctypes.string_at(self._view_pointer,MAPPING_SIZE)
             values = struct.unpack(SNAPSHOT_FORMAT, raw)
             sequence_start = values[0]
             sequence_end = values[-1]

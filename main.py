@@ -16,6 +16,7 @@ from modes.pcsx2 import Pcsx2Logic
 from modes.rpcs3 import Rpcs3Logic
 from modes.running_train import RunningLogic
 from bve_vehicle_spec import BveVehicleSpecReceiver
+from platform_detection import EfficientPlatformDetector
 
 try:
     myappid = 'my.dengo.converter.v21.ux_improved'
@@ -49,22 +50,16 @@ def force_reset_state(*args):
     logics[game_mode].reset()
     print(f"State Reset Executed for {game_mode}.")
 
-def toggle_game_mode(mouse_btn=1, *args):
+def set_game_mode(new_mode):
     global game_mode, max_power, max_brake, brake_mode, midosuji_mode, ae100_mode, keihan_mode, mode_787, yokusoku_mode
-    modes = ["JRETS", "BVE", "PCSX2", "RPCS3", "RUNNING"]
-    idx = modes.index(game_mode)
-    next_idx = (idx + 1) % len(modes) if mouse_btn == 1 else (idx - 1) % len(modes)
-    game_mode = modes[next_idx]
-    
-    midosuji_mode = False
-    ae100_mode = False
-    keihan_mode = False
-    mode_787 = False
-    yokusoku_mode = False
-    max_power = 5
-    max_brake = 8
-    brake_mode = "1"
-    logics[game_mode].reset()
+    if new_mode == game_mode: return False
+    game_mode = new_mode
+    midosuji_mode = ae100_mode = keihan_mode = mode_787 = yokusoku_mode = False
+    max_power, max_brake, brake_mode = 5, 8, "1"
+    logics[game_mode].reset(); return True
+
+def toggle_game_mode(mouse_btn=1, *args):
+    modes=["JRETS","BVE","PCSX2","RPCS3","RUNNING"];idx=modes.index(game_mode);set_game_mode(modes[(idx+1)%len(modes) if mouse_btn==1 else (idx-1)%len(modes)])
 
 def toggle_brake_mode(*args):
     global brake_mode, midosuji_mode, ae100_mode, keihan_mode, mode_787, yokusoku_mode, max_power, max_brake
@@ -202,6 +197,7 @@ def main():
     mascon_filter = StableNotchReader(0)
     brake_filter = StableNotchReader(0)
     bve_spec_receiver = BveVehicleSpecReceiver()
+    platform_detector = EfficientPlatformDetector(probe_interval=0.20, full_resync_interval=3.0)
     last_bve_control_config = None
 
     header_h, label_y, val_y, gauge_start_y = 70, 90, 120, 180
@@ -211,6 +207,7 @@ def main():
 
     btn_reset = Button(reset_x, (header_h - 40)//2, 100, 40, "リセット", force_reset_state, color=(60, 60, 80))
     btn_game_mode = Button(pcsx2_btn_x, (header_h - 40)//2, 100, 40, "JRETS", toggle_game_mode, color=COLOR_N)
+    btn_game_mode.interactive = False
     btn_brake_mode = Button(20, (header_h - 40)//2, 140, 40, "モード切替", toggle_brake_mode, color=(60, 60, 80))
     
     btn_midosuji = Button(midosuji_btn_x, (header_h - 40)//2, 60, 40, "通常", toggle_midosuji, color=COLOR_NORMAL_BTN)
@@ -238,12 +235,19 @@ def main():
             for btn in all_btns:
                 btn.handle_event(event)
 
+        platform_statuses=platform_detector.update()
+        running_platforms=tuple(s for s in platform_statuses if s.running)
+        platform_count=sum(len(s.process_ids) for s in running_platforms)
+        if platform_count==1:
+            s=next(s for s in running_platforms if s.process_ids)
+            set_game_mode({"jrets":"JRETS","bve5":"BVE","bve6":"BVE","pcsx2":"PCSX2","rpcs3":"RPCS3","running_train":"RUNNING"}[s.platform_id])
         effective_brake_mode = brake_mode
         effective_max_power = max_power
         effective_max_brake = max_brake
         effective_yokusoku_mode = yokusoku_mode
 
-        if game_mode == "BVE":
+        bve_process_count=sum(len(s.process_ids) for s in platform_statuses if s.platform_id in ("bve5","bve6"))
+        if game_mode == "BVE" and bve_process_count == 1:
             vehicle_spec = bve_spec_receiver.read()
             if vehicle_spec is not None:
                 effective_max_power = vehicle_spec.power_notch_count
@@ -267,6 +271,7 @@ def main():
                 logics["BVE"].reset()
                 last_bve_control_config = bve_control_config
         else:
+            bve_spec_receiver.disconnect()
             last_bve_control_config = None
 
         btn_brake_mode.interactive = game_mode != "BVE"
@@ -344,12 +349,12 @@ def main():
             midosuji_mode, ae100_mode, keihan_mode, mode_787, effective_yokusoku_mode,
             display_p, display_b,
             tuple(b.hover for b in all_btns if b.visible),
-            b_val, p_pat
+            b_val, p_pat, tuple((s.platform_id,s.running,s.process_ids) for s in platform_statuses)
         )
 
         if current_visual_state != last_visual_state:
             # ★ 追加: ウィンドウの伸縮処理
-            req_h = get_dynamic_height(game_mode, effective_brake_mode, effective_max_power, effective_max_brake)
+            req_h = 260 if platform_count != 1 else get_dynamic_height(game_mode, effective_brake_mode, effective_max_power, effective_max_brake)
             if screen.get_height() != req_h:
                 screen = pygame.display.set_mode((SCREEN_WIDTH, req_h))
 
@@ -396,7 +401,7 @@ def main():
             
             # ★ 修正: SCREEN_HEIGHT ではなく、現在の screen.get_height() の下端に追従させる
             screen.blit(dbg, (20, screen.get_height() - 30))
-
+            if platform_count != 1: ui.draw_platform_gate_screen(screen, platform_statuses, platform_count)
             pygame.display.flip()
             last_visual_state = current_visual_state
 
