@@ -11,3 +11,9 @@ Control flow:
 
 Local third-party DLL references, bin, and obj are intentionally excluded from Git.
 Public artifacts must use Coruge-to as the provider name.
+
+## Verified environments
+
+- BVE Trainsim 6: Ecb and Smee vehicle specifications, notch counts, holding-speed brake state, scenario changes, and pause-independent Caller/Bridge control were verified on actual scenarios.
+- BVE Trainsim 5: Cl, Smee, and Ecb vehicle specifications were verified on actual scenarios. Disabling the DenGo input device correctly returned the converter to its initial 5-power/8-brake state.
+- BveEX legacy mode for AtsEX-compatible vehicles is not yet supported or verified. Treat this as a separate compatibility investigation because legacy loading, namespaces, assemblies, and lifecycle contracts may differ from current BveEX mode.
