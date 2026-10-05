@@ -1,4 +1,4 @@
-# ui.py
+﻿# ui.py
 import pygame
 import math
 from const import *
@@ -30,12 +30,13 @@ class Button:
         self.font_key = font_key
         self.hover = False
         self.visible = True
+        self.interactive = True
 
     def draw(self, surface):
         if not self.visible: return
         pygame.draw.rect(surface, self.base_color, self.rect, border_radius=4)
         
-        if self.hover:
+        if self.hover and self.interactive:
             pygame.draw.rect(surface, (255, 255, 255), self.rect, 3, border_radius=4)
         else:
             pygame.draw.rect(surface, (100, 100, 100), self.rect, 1, border_radius=4)
@@ -66,8 +67,8 @@ class Button:
                 current_y += txt_surf.get_height() + line_spacing
 
     def handle_event(self, event):
-        if not self.visible: 
-            self.hover = False # 非表示ならホバー状態を強制解除
+        if not self.visible or not self.interactive:
+            self.hover = False # 非表示・表示専用ならホバー状態を強制解除
             return
 
         if event.type == pygame.MOUSEMOTION:
