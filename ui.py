@@ -343,14 +343,161 @@ def _outlined(surface,text,font,center):
  o=font.render(text,True,(0,0,0));x,y=center
  for dx,dy in ((-2,0),(2,0),(0,-2),(0,2),(-2,-2),(-2,2),(2,-2),(2,2)):surface.blit(o,o.get_rect(center=(x+dx,y+dy)))
  r=font.render(text,True,COLOR_TEXT);surface.blit(r,r.get_rect(center=center))
-def draw_platform_gate_screen(surface,statuses,count):
- surface.fill(COLOR_BG)
- title,body,heading=("対応ソフトが起動していません","使用するソフトを1つ起動してください","対応ソフト") if count==0 else ("複数の対応ソフトが起動しています","使用するソフトを1つだけ残し、他のソフトを閉じてください","起動中のソフト")
- th,bh,hh=fonts['gate_title'].get_height(),fonts['gate_body'].get_height(),fonts['ui_bold_s'].get_height();g1,g2,g3,button=22,28,12,40;total=th+g1+bh+g2+hh+g3+button;top=(surface.get_height()-total)//2
- ty=top+th//2;by=top+th+g1+bh//2;hy=top+th+g1+bh+g2+hh//2;y=top+th+g1+bh+g2+hh+g3
- _outlined(surface,title,fonts['gate_title'],(surface.get_width()//2,ty));_outlined(surface,body,fonts['gate_body'],(surface.get_width()//2,by));_outlined(surface,heading,fonts['ui_bold_s'],(surface.get_width()//2,hy))
- colors={"jrets":COLOR_N,"bve5":COLOR_B_SVC,"bve6":COLOR_B_SVC,"pcsx2":COLOR_P,"rpcs3":COLOR_RPCS3_BTN,"running_train":COLOR_RUNNING};w,gap=100,10;start=(surface.get_width()-(w*len(statuses)+gap*(len(statuses)-1)))//2
- for i,s in enumerate(statuses):
-  rect=pygame.Rect(start+i*(w+gap),y,w,button);active=count==0 or s.running;pygame.draw.rect(surface,colors.get(s.platform_id,COLOR_NORMAL_BTN) if active else COLOR_OFF_FILL,rect,border_radius=4);pygame.draw.rect(surface,(90,90,90),rect,1,border_radius=4);color=COLOR_TEXT if active else COLOR_TEXT_DIM;lines=[s.display_name] if s.display_name!="RUNNING TRAIN" else ["RUNNING","TRAIN"]
-  for j,line in enumerate(lines):
-   r=fonts['platform'].render(line,True,color);surface.blit(r,r.get_rect(center=(rect.centerx,rect.centery if len(lines)==1 else rect.centery-7+j*14)))
+def draw_platform_gate_screen(surface, statuses, count):
+    surface.fill(COLOR_BG)
+
+    if count == 0:
+        title = "対応ソフトが起動していません"
+        body = "使用するソフトを1つ起動してください"
+        heading = "対応ソフト"
+    else:
+        title = "複数の対応ソフトが起動しています"
+        body = "使用するソフトを1つだけ残し、他のソフトを閉じてください"
+        heading = "起動中のソフト"
+
+    title_font = fonts['gate_title']
+    body_font = fonts['gate_body']
+    heading_font = fonts['ui_bold_s']
+
+    title_height = title_font.get_height()
+    body_height = body_font.get_height()
+
+    title_body_gap = 22
+    body_frame_gap = 28
+    button_width = 100
+    button_height = 40
+    button_gap = 10
+    frame_padding = 20
+    optical_balance_y = -5
+    heading_to_button = 24
+    frame_radius = 12
+    frame_width_px = 2
+    frame_color = (190, 190, 190)
+    heading_side_gap = 14
+
+    button_group_width = (
+        button_width * len(statuses)
+        + button_gap * (len(statuses) - 1)
+    )
+    frame_width = button_group_width + frame_padding * 2
+    frame_height = heading_to_button + button_height + frame_padding
+
+    total_height = (
+        title_height
+        + title_body_gap
+        + body_height
+        + body_frame_gap
+        + frame_height
+    )
+    top = (surface.get_height() - total_height) // 2
+    center_x = surface.get_width() // 2
+
+    title_center_y = top + title_height // 2
+
+    title_top_margin = top
+    desired_frame_bottom = (
+        surface.get_height()
+        - title_top_margin
+        + optical_balance_y
+    )
+    desired_frame_top = desired_frame_bottom - frame_height
+
+    original_frame_top = (
+        top
+        + title_height
+        + title_body_gap
+        + body_height
+        + body_frame_gap
+    )
+
+    content_group_shift_y = desired_frame_top - original_frame_top
+
+    body_center_y = (
+        top
+        + title_height
+        + title_body_gap
+        + body_height // 2
+        + content_group_shift_y
+    )
+
+    frame_top = desired_frame_top
+
+    frame_rect = pygame.Rect(
+        center_x - frame_width // 2,
+        frame_top,
+        frame_width,
+        frame_height,
+    )
+    button_y = frame_top + heading_to_button
+    button_start_x = frame_rect.left + frame_padding
+
+    _outlined(surface, title, title_font, (center_x, title_center_y))
+    _outlined(surface, body, body_font, (center_x, body_center_y))
+
+    pygame.draw.rect(
+        surface,
+        frame_color,
+        frame_rect,
+        frame_width_px,
+        border_radius=frame_radius,
+    )
+
+    heading_surface = heading_font.render(heading, True, COLOR_TEXT)
+    heading_outline = heading_font.render(heading, True, (0, 0, 0))
+    heading_rect = heading_surface.get_rect(center=(center_x, frame_top))
+    heading_gap_rect = pygame.Rect(
+        heading_rect.left - heading_side_gap,
+        frame_top - frame_width_px,
+        heading_rect.width + heading_side_gap * 2,
+        frame_width_px * 2 + 1,
+    )
+    pygame.draw.rect(surface, COLOR_BG, heading_gap_rect)
+
+    for dx, dy in ((-2, 0), (2, 0), (0, -2), (0, 2),
+                   (-2, -2), (-2, 2), (2, -2), (2, 2)):
+        surface.blit(
+            heading_outline,
+            heading_outline.get_rect(center=(center_x + dx, frame_top + dy)),
+        )
+    surface.blit(heading_surface, heading_rect)
+
+    colors = {
+        "jrets": COLOR_N,
+        "bve5": COLOR_B_SVC,
+        "bve6": COLOR_B_SVC,
+        "pcsx2": COLOR_P,
+        "rpcs3": COLOR_RPCS3_BTN,
+        "running_train": COLOR_RUNNING,
+    }
+
+    for index, status in enumerate(statuses):
+        rect = pygame.Rect(
+            button_start_x + index * (button_width + button_gap),
+            button_y,
+            button_width,
+            button_height,
+        )
+        active = count == 0 or status.running
+        fill_color = (
+            colors.get(status.platform_id, COLOR_NORMAL_BTN)
+            if active
+            else COLOR_OFF_FILL
+        )
+        text_color = COLOR_TEXT if active else COLOR_TEXT_DIM
+
+        pygame.draw.rect(surface, fill_color, rect, border_radius=4)
+        pygame.draw.rect(surface, (90, 90, 90), rect, 1, border_radius=4)
+
+        lines = (
+            [status.display_name]
+            if status.display_name != "RUNNING TRAIN"
+            else ["RUNNING", "TRAIN"]
+        )
+        for line_index, line in enumerate(lines):
+            rendered = fonts['platform'].render(line, True, text_color)
+            line_y = (
+                rect.centery
+                if len(lines) == 1
+                else rect.centery - 7 + line_index * 14
+            )
+            surface.blit(rendered, rendered.get_rect(center=(rect.centerx, line_y)))
