@@ -2,8 +2,8 @@
 import pygame
 
 # ★PCSX2/RPCS3モード専用設定 (秒)
-PCSX2_PRESS_DURATION = 0.04
-PCSX2_RELEASE_DURATION = 0.04
+PCSX2_PRESS_DURATION = 0.035
+PCSX2_RELEASE_DURATION = 0.035
 PCSX2_RESET_WAIT = 0.05
 
 FPS = 60
@@ -64,6 +64,16 @@ KEY_PCSX2_N         = 's' # マスコン切 (N) ショートカット
 KEY_PCSX2_EMG       = '/' # 非常ブレーキ (PCSX2専用)
 KEY_PCSX2_HORN1     = 'enter'     # SELECT
 KEY_PCSX2_HORN2     = 'backspace' # START
+
+# --- Virtual gamepad contract for PCSX2 ---
+VGPAD_PCSX2_POWER_INC = 'dpad_down'
+VGPAD_PCSX2_POWER_DEC = 'dpad_up'
+VGPAD_PCSX2_N         = 'dpad_left'
+VGPAD_PCSX2_BRAKE_INC = 'a'
+VGPAD_PCSX2_BRAKE_DEC = 'x'
+VGPAD_PCSX2_EMG       = 'b'
+VGPAD_PCSX2_SELECT    = 'y'
+VGPAD_PCSX2_START     = 'start'
 
 # --- 定数マップ ---
 # 電気指令式 => 構成 : 緩解, 常用13段, 非常

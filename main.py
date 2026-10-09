@@ -18,6 +18,7 @@ from modes.running_train import RunningLogic
 from bve_vehicle_spec import BveVehicleSpecReceiver
 from platform_detection import EfficientPlatformDetector
 from window_message_backend import WindowMessageBackend, WindowTarget
+from virtual_gamepad_backend import VirtualGamepadBackend
 
 try:
     myappid = 'my.dengo.converter.v21.ux_improved'
@@ -40,10 +41,11 @@ mode_787 = False
 yokusoku_mode = False
 
 window_backend = WindowMessageBackend()
+virtual_gamepad_backend = VirtualGamepadBackend()
 logics = {
     "JRETS": JretsLogic(window_backend),
     "BVE": BveLogic(),
-    "PCSX2": Pcsx2Logic(),
+    "PCSX2": Pcsx2Logic(virtual_gamepad_backend),
     "RPCS3": Rpcs3Logic(window_backend),
     "RUNNING": RunningLogic(window_backend)
 }
@@ -193,8 +195,45 @@ def main():
     ui.init_fonts()
 
     pygame.joystick.init()
-    joy = pygame.joystick.Joystick(0) if pygame.joystick.get_count() > 0 else None
-    if joy: joy.init()
+    joy = None
+    joystick_count = pygame.joystick.get_count()
+    candidates = []
+    for index in range(joystick_count):
+        candidate = pygame.joystick.Joystick(index)
+        candidate.init()
+        candidates.append(candidate)
+
+    preferred = [
+        candidate for candidate in candidates
+        if "ELECOM JC-PS201U" in candidate.get_name()
+        and candidate.get_numbuttons() >= 16
+    ]
+    if preferred:
+        joy = preferred[0]
+    else:
+        compatible = [candidate for candidate in candidates if candidate.get_numbuttons() >= 16]
+        if compatible:
+            joy = compatible[0]
+
+    if joy is None:
+        detected = ", ".join(
+            f"{candidate.get_name()} ({candidate.get_numbuttons()} buttons)"
+            for candidate in candidates
+        )
+        raise RuntimeError(
+            "Compatible DenGo controller was not found. "
+            f"Detected controllers: {detected or 'none'}"
+        )
+
+    print(
+        f"DENGO_CONTROLLER={joy.get_name()} BUTTONS={joy.get_numbuttons()}",
+        flush=True,
+    )
+
+    try:
+        virtual_gamepad_backend.connect()
+    except RuntimeError as exc:
+        print(f"Virtual gamepad unavailable: {exc}", flush=True)
 
     mascon_filter = StableNotchReader(0)
     brake_filter = StableNotchReader(0)
@@ -287,6 +326,8 @@ def main():
             logics[game_mode].reset()
             active_window_route = None
         input_was_enabled = can_send_input
+        if not (can_send_input and game_mode == "PCSX2"):
+            virtual_gamepad_backend.neutralize()
         effective_brake_mode = brake_mode
         effective_max_power = max_power
         effective_max_brake = max_brake
@@ -468,6 +509,7 @@ def main():
 
     window_backend.detach()
     logics[game_mode].reset()
+    virtual_gamepad_backend.disconnect()
     bve_spec_receiver.close()
     pygame.quit()
 
