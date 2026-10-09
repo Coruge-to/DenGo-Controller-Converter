@@ -1,4 +1,4 @@
-﻿# main.py
+# main.py
 import sys
 import os
 import ctypes
@@ -17,6 +17,7 @@ from modes.rpcs3 import Rpcs3Logic
 from modes.running_train import RunningLogic
 from bve_vehicle_spec import BveVehicleSpecReceiver
 from platform_detection import EfficientPlatformDetector
+from window_message_backend import WindowMessageBackend, WindowTarget
 
 try:
     myappid = 'my.dengo.converter.v21.ux_improved'
@@ -38,12 +39,13 @@ keihan_mode = False
 mode_787 = False
 yokusoku_mode = False
 
+window_backend = WindowMessageBackend()
 logics = {
-    "JRETS": JretsLogic(),
+    "JRETS": JretsLogic(window_backend),
     "BVE": BveLogic(),
     "PCSX2": Pcsx2Logic(),
-    "RPCS3": Rpcs3Logic(),
-    "RUNNING": RunningLogic()
+    "RPCS3": Rpcs3Logic(window_backend),
+    "RUNNING": RunningLogic(window_backend)
 }
 
 def force_reset_state(*args):
@@ -198,6 +200,8 @@ def main():
     brake_filter = StableNotchReader(0)
     bve_spec_receiver = BveVehicleSpecReceiver()
     platform_detector = EfficientPlatformDetector(probe_interval=0.20, full_resync_interval=3.0)
+    active_window_route = None
+    input_was_enabled = False
     last_bve_control_config = None
 
     header_h, label_y, val_y, gauge_start_y = 70, 90, 120, 180
@@ -238,9 +242,51 @@ def main():
         platform_statuses=platform_detector.update()
         running_platforms=tuple(s for s in platform_statuses if s.running)
         platform_count=sum(len(s.process_ids) for s in running_platforms)
-        if platform_count==1:
-            s=next(s for s in running_platforms if s.process_ids)
-            set_game_mode({"jrets":"JRETS","bve5":"BVE","bve6":"BVE","pcsx2":"PCSX2","rpcs3":"RPCS3","running_train":"RUNNING"}[s.platform_id])
+        single_platform = next((s for s in running_platforms if len(s.process_ids) == 1), None) if platform_count == 1 else None
+        mode_map = {"jrets":"JRETS","bve5":"BVE","bve6":"BVE","pcsx2":"PCSX2","rpcs3":"RPCS3","running_train":"RUNNING"}
+        if single_platform is not None:
+            desired_mode = mode_map[single_platform.platform_id]
+            if desired_mode != game_mode:
+                window_backend.detach()
+                logics[game_mode].reset()
+                active_window_route = None
+                set_game_mode(desired_mode)
+
+        can_send_input = single_platform is not None and mode_map[single_platform.platform_id] == game_mode
+        wm_platforms = {"jrets", "rpcs3", "running_train"}
+        if can_send_input and single_platform.platform_id in wm_platforms:
+            windows = list(single_platform.windows)
+            selected = None
+            if single_platform.platform_id == "rpcs3":
+                preferred = [w for w in windows if "owndc" in w.window_class.lower() and "fps:" in w.window_title.lower()]
+                if len(preferred) == 1:
+                    selected = preferred[0]
+            elif single_platform.platform_id == "running_train":
+                preferred = [w for w in windows if w.window_class == "UnrealWindow"]
+                if len(preferred) == 1:
+                    selected = preferred[0]
+            elif len(windows) == 1:
+                selected = windows[0]
+
+            if selected is None:
+                can_send_input = False
+            else:
+                route = (single_platform.platform_id, selected.process_id, selected.window_handle)
+                if route != active_window_route:
+                    window_backend.detach()
+                    logics[game_mode].reset()
+                    window_backend.attach(WindowTarget(single_platform.platform_id, selected.process_id, selected.window_handle, selected.window_class, selected.window_title))
+                    active_window_route = route
+        else:
+            if active_window_route is not None:
+                window_backend.detach()
+                active_window_route = None
+
+        if not can_send_input and input_was_enabled:
+            window_backend.detach()
+            logics[game_mode].reset()
+            active_window_route = None
+        input_was_enabled = can_send_input
         effective_brake_mode = brake_mode
         effective_max_power = max_power
         effective_max_brake = max_brake
@@ -261,7 +307,6 @@ def main():
 
             bve_control_config = (
                 None if vehicle_spec is None else vehicle_spec.writer_process_id,
-                None if vehicle_spec is None else vehicle_spec.generation,
                 effective_brake_mode,
                 effective_max_power,
                 effective_max_brake,
@@ -416,10 +461,13 @@ def main():
             "keihan_mode": keihan_mode,
             "mode_787": mode_787 
         }
-        logics[game_mode].update(cur_p, cur_b, raw_btns, context)
-        
+        if can_send_input:
+            logics[game_mode].update(cur_p, cur_b, raw_btns, context)
+
         clock.tick(FPS)
 
+    window_backend.detach()
+    logics[game_mode].reset()
     bve_spec_receiver.close()
     pygame.quit()
 

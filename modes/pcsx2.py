@@ -10,6 +10,8 @@ class Pcsx2Logic(BaseLogic):
         self.prev_axis = 0
 
     def reset(self):
+        pydirectinput.keyUp(KEY_PCSX2_HORN1)
+        pydirectinput.keyUp(KEY_PCSX2_HORN2)
         super().reset()
         self.prev_axis = 0
         pydirectinput.keyUp(KEY_PCSX2_POWER_INC)

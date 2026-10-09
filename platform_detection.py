@@ -22,8 +22,11 @@ kernel32.IsWow64Process.restype=wintypes.BOOL
 class PROCESSENTRY32W(ctypes.Structure):
  _fields_=[("dwSize",wintypes.DWORD),("cntUsage",wintypes.DWORD),("th32ProcessID",wintypes.DWORD),("th32DefaultHeapID",ctypes.c_size_t),("th32ModuleID",wintypes.DWORD),("cntThreads",wintypes.DWORD),("th32ParentProcessID",wintypes.DWORD),("pcPriClassBase",wintypes.LONG),("dwFlags",wintypes.DWORD),("szExeFile",wintypes.WCHAR*260)]
 @dataclass(frozen=True)
+class PlatformWindow:
+ process_id:int;window_handle:int;window_title:str;window_class:str
+@dataclass(frozen=True)
 class PlatformStatus:
- platform_id:str;display_name:str;running:bool;process_ids:tuple;window_titles:tuple
+ platform_id:str;display_name:str;running:bool;process_ids:tuple;window_titles:tuple;windows:tuple
 PLATFORMS=(("jrets","JRETS"),("bve5","BVE5"),("bve6","BVE6"),("pcsx2","PCSX2"),("rpcs3","RPCS3"),("running_train","RUNNING TRAIN"))
 def _target_processes():
  s=kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS,0)
@@ -49,7 +52,7 @@ def _windows(pids):
   if not user32.IsWindowVisible(hwnd):return True
   p=wintypes.DWORD();user32.GetWindowThreadProcessId(hwnd,ctypes.byref(p));p=int(p.value)
   if p not in pids:return True
-  n=user32.GetWindowTextLengthW(hwnd);tb=ctypes.create_unicode_buffer(n+1);user32.GetWindowTextW(hwnd,tb,n+1);c=ctypes.create_unicode_buffer(256);user32.GetClassNameW(hwnd,c,256);r.setdefault(p,[]).append((tb.value,c.value));return True
+  n=user32.GetWindowTextLengthW(hwnd);tb=ctypes.create_unicode_buffer(n+1);user32.GetWindowTextW(hwnd,tb,n+1);c=ctypes.create_unicode_buffer(256);user32.GetClassNameW(hwnd,c,256);r.setdefault(p,[]).append((int(hwnd),tb.value,c.value));return True
  user32.EnumWindows(T(cb),0);return r
 def _architecture(pid):
  h=kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,False,pid)
@@ -78,17 +81,17 @@ def _classify(pid,n,path,ws):
  if n in ("pcsx2.exe","pcsx2-qt.exe"):return "pcsx2"
  if n=="rpcs3.exe":return "rpcs3"
  if n=="jreast_trainsimulator.exe":return "jrets"
- if n=="runningtrain-win64-shipping.exe" and any(c=="UnrealWindow" for _,c in ws):return "running_train"
+ if n=="runningtrain-win64-shipping.exe" and any(c=="UnrealWindow" for _,_,c in ws):return "running_train"
 def _scan(ps):
  w=_windows(pid for pid,_ in ps);f={p:[] for p,_ in PLATFORMS};u=False
  for pid,n in ps:
   ws=w.get(pid,[])
   if not ws:u=True;continue
   q=_classify(pid,n,_path(pid),ws)
-  if q:f[q].append((pid,tuple(t for t,_ in ws if t)))
- return tuple(PlatformStatus(p,l,bool(f[p]),tuple(e[0] for e in f[p]),tuple(t for e in f[p] for t in e[1])) for p,l in PLATFORMS),u
+  if q:f[q].append((pid,tuple((hwnd,t,c) for hwnd,t,c in ws)))
+ return tuple(PlatformStatus(p,l,bool(f[p]),tuple(e[0] for e in f[p]),tuple(t for e in f[p] for _,t,_ in e[1] if t),tuple(PlatformWindow(e[0],hwnd,t,c) for e in f[p] for hwnd,t,c in e[1])) for p,l in PLATFORMS),u
 class EfficientPlatformDetector:
- def __init__(self,probe_interval=.2,full_resync_interval=3.):self.probe_interval=probe_interval;self.full_resync_interval=full_resync_interval;self.a=0.;self.b=0.;self.s=None;self.u=True;self.v=tuple(PlatformStatus(p,n,False,(),()) for p,n in PLATFORMS)
+ def __init__(self,probe_interval=.2,full_resync_interval=3.):self.probe_interval=probe_interval;self.full_resync_interval=full_resync_interval;self.a=0.;self.b=0.;self.s=None;self.u=True;self.v=tuple(PlatformStatus(p,n,False,(),(),()) for p,n in PLATFORMS)
  def update(self):
   now=time.monotonic()
   if now-self.a<self.probe_interval:return self.v

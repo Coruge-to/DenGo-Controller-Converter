@@ -9,9 +9,14 @@ class BveLogic(BaseLogic):
         self.auto_state = 0 
 
     def reset(self):
+        if self.p_start:
+            pydirectinput.keyUp(KEY_START_BVE)
+
+        if self.p_select:
+            pydirectinput.keyUp(KEY_SELECT)
+
         super().reset()
         self.auto_state = 0
-
     def update(self, raw_p, raw_b, raw_btns, context):
         brake_mode = context.get('brake_mode', '1')
         max_brake = context['max_brake']
