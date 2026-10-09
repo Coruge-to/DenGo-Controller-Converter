@@ -233,11 +233,6 @@ def main():
         flush=True,
     )
 
-    try:
-        virtual_gamepad_backend.connect()
-    except RuntimeError as exc:
-        print(f"Virtual gamepad unavailable: {exc}", flush=True)
-
     mascon_filter = StableNotchReader(0)
     brake_filter = StableNotchReader(0)
     physical_brake_filter = StableNotchReader(0)
@@ -246,6 +241,7 @@ def main():
     platform_detector = EfficientPlatformDetector(probe_interval=0.20, full_resync_interval=3.0)
     active_window_route = None
     input_was_enabled = False
+    virtual_gamepad_retry_at = 0.0
     last_bve_control_config = None
     bve_handle_generation = 0
     bve_handle_was_valid = False
@@ -336,9 +332,25 @@ def main():
             window_backend.detach()
             logics[game_mode].reset()
             active_window_route = None
+
+        virtual_gamepad_required = can_send_input and game_mode == "PCSX2"
+        if virtual_gamepad_required:
+            if not virtual_gamepad_backend.connected:
+                now_monotonic = time.monotonic()
+                if now_monotonic >= virtual_gamepad_retry_at:
+                    try:
+                        virtual_gamepad_backend.connect()
+                    except RuntimeError as exc:
+                        print(f"Virtual gamepad unavailable: {exc}", flush=True)
+                        virtual_gamepad_retry_at = now_monotonic + 1.0
+                if not virtual_gamepad_backend.connected:
+                    can_send_input = False
+        else:
+            virtual_gamepad_retry_at = 0.0
+            if virtual_gamepad_backend.connected:
+                virtual_gamepad_backend.disconnect()
+
         input_was_enabled = can_send_input
-        if not (can_send_input and game_mode == "PCSX2"):
-            virtual_gamepad_backend.neutralize()
         effective_brake_mode = brake_mode
         effective_max_power = max_power
         effective_max_brake = max_brake
