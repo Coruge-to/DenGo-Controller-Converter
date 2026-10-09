@@ -2,6 +2,7 @@
 import sys
 import os
 import ctypes
+import time
 import pygame
 import pydirectinput
 
@@ -16,6 +17,8 @@ from modes.pcsx2 import Pcsx2Logic
 from modes.rpcs3 import Rpcs3Logic
 from modes.running_train import RunningLogic
 from bve_vehicle_spec import BveVehicleSpecReceiver
+from bve_handle_command import resolve_bve_handle_command
+from bve_handle_ipc import BveHandleCommandPublisher
 from platform_detection import EfficientPlatformDetector
 from window_message_backend import WindowMessageBackend, WindowTarget
 from virtual_gamepad_backend import VirtualGamepadBackend
@@ -237,11 +240,19 @@ def main():
 
     mascon_filter = StableNotchReader(0)
     brake_filter = StableNotchReader(0)
+    physical_brake_filter = StableNotchReader(0)
     bve_spec_receiver = BveVehicleSpecReceiver()
+    bve_handle_publisher = BveHandleCommandPublisher()
     platform_detector = EfficientPlatformDetector(probe_interval=0.20, full_resync_interval=3.0)
     active_window_route = None
     input_was_enabled = False
     last_bve_control_config = None
+    bve_handle_generation = 0
+    bve_handle_was_valid = False
+    bve_handle_writer_process_id = None
+    bve_handle_last_signature = None
+    bve_handle_last_publish_monotonic = 0.0
+    bve_handle_heartbeat_seconds = 0.5
 
     header_h, label_y, val_y, gauge_start_y = 70, 90, 120, 180
     mascon_cx, elec_brake_cx = MARGIN_SIDE + 50, SCREEN_WIDTH - MARGIN_SIDE - 50
@@ -333,6 +344,7 @@ def main():
         effective_max_brake = max_brake
         effective_yokusoku_mode = yokusoku_mode
 
+        vehicle_spec = None
         bve_process_count=sum(len(s.process_ids) for s in platform_statuses if s.platform_id in ("bve5","bve6"))
         if game_mode == "BVE" and bve_process_count == 1:
             vehicle_spec = bve_spec_receiver.read()
@@ -414,9 +426,11 @@ def main():
              raw_b = ELECTRIC_BRAKE_MAP.get(b_val, -1) if effective_brake_mode == "1" else AUTO_BRAKE_MAP.get(b_val, -1)
         
         raw_p = MASCON_LEVEL_MAP.get(p_pat, -1)
+        physical_raw_b = ELECTRIC_BRAKE_MAP.get(b_val, -1)
 
         cur_p = min(mascon_filter.update(raw_p), effective_max_power)
         cur_b = brake_filter.update(raw_b)
+        physical_cur_b = physical_brake_filter.update(physical_raw_b)
         
         if game_mode in ["PCSX2", "RPCS3"]:
              if cur_b == 14: display_b = effective_max_brake + 1
@@ -502,11 +516,45 @@ def main():
             "keihan_mode": keihan_mode,
             "mode_787": mode_787 
         }
-        if can_send_input:
-            logics[game_mode].update(cur_p, cur_b, raw_btns, context)
+        if game_mode == "BVE":
+            source_ready = can_send_input and vehicle_spec is not None and bve_spec_receiver.source_enabled
+            source_valid = source_ready and bve_spec_receiver.source_valid
+            writer_process_id = None if vehicle_spec is None else vehicle_spec.writer_process_id
+            if writer_process_id != bve_handle_writer_process_id:
+                bve_handle_writer_process_id = writer_process_id
+                bve_handle_was_valid = False
+            if source_valid and not bve_handle_was_valid:
+                bve_handle_generation += 1
+            bve_handle_was_valid = source_valid
+            now_monotonic = time.monotonic()
+            if source_ready:
+                command = resolve_bve_handle_command(cur_p, physical_cur_b, effective_brake_mode, effective_max_power, effective_max_brake)
+                signature = (True, source_valid, bve_handle_generation, command)
+                heartbeat_due = now_monotonic - bve_handle_last_publish_monotonic >= bve_handle_heartbeat_seconds
+                if signature != bve_handle_last_signature or heartbeat_due:
+                    bve_handle_publisher.publish_command(command, bve_handle_generation, True, source_valid)
+                    bve_handle_last_signature = signature
+                    bve_handle_last_publish_monotonic = now_monotonic
+            else:
+                signature = (False, False, bve_handle_generation, None)
+                if signature != bve_handle_last_signature:
+                    bve_handle_publisher.publish_disabled(bve_handle_generation)
+                    bve_handle_last_signature = signature
+                    bve_handle_last_publish_monotonic = now_monotonic
+        else:
+            bve_handle_was_valid = False
+            bve_handle_writer_process_id = None
+            signature = (False, False, bve_handle_generation, None)
+            if signature != bve_handle_last_signature:
+                bve_handle_publisher.publish_disabled(bve_handle_generation)
+                bve_handle_last_signature = signature
+                bve_handle_last_publish_monotonic = time.monotonic()
+            if can_send_input:
+                logics[game_mode].update(cur_p, cur_b, raw_btns, context)
 
         clock.tick(FPS)
 
+    bve_handle_publisher.close()
     window_backend.detach()
     logics[game_mode].reset()
     virtual_gamepad_backend.disconnect()

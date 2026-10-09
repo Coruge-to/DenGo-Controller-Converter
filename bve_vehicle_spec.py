@@ -51,6 +51,16 @@ class BveVehicleSpecReceiver:
         self._last_writer_process_id = None
         self._last_caller_enabled = None
         self._minimum_fresh_utc_ticks = None
+        self._source_enabled = False
+        self._source_valid = False
+        self._current_generation = 0
+
+    @property
+    def source_enabled(self): return self._source_enabled
+    @property
+    def source_valid(self): return self._source_valid
+    @property
+    def current_generation(self): return self._current_generation
 
     def close(self):
         self.disconnect()
@@ -58,6 +68,9 @@ class BveVehicleSpecReceiver:
         self._last_writer_process_id = None
         self._last_caller_enabled = None
         self._minimum_fresh_utc_ticks = None
+        self._source_enabled = False
+        self._source_valid = False
+        self._current_generation = 0
 
     def disconnect(self):
         if self._view_pointer:
@@ -69,6 +82,9 @@ class BveVehicleSpecReceiver:
         self._clear_cache()
         self._last_caller_enabled = None
         self._minimum_fresh_utc_ticks = None
+        self._source_enabled = False
+        self._source_valid = False
+        self._current_generation = 0
 
     def __enter__(self):
         return self
@@ -97,6 +113,8 @@ class BveVehicleSpecReceiver:
         return None
 
     def read(self):
+        self._source_enabled = False
+        self._source_valid = False
         try:
             values = self._read_consistent_values()
         except (FileNotFoundError, OSError, ValueError):
@@ -122,6 +140,7 @@ class BveVehicleSpecReceiver:
             source_enabled,
             _sequence_end,
         ) = values
+        self._current_generation = max(0, generation)
 
         if magic != MAGIC or schema_version != SCHEMA_VERSION:
             self._clear_cache()
@@ -153,6 +172,7 @@ class BveVehicleSpecReceiver:
 
         if not source_enabled:
             return None
+        self._source_enabled = True
 
         if (
             self._minimum_fresh_utc_ticks is not None
@@ -182,6 +202,7 @@ class BveVehicleSpecReceiver:
             effective_brake_count = brake_notch_count
             effective_holding = bool(has_holding_speed_brake)
 
+        self._source_valid = True
         current_spec = BveVehicleSpec(
             valid=True,
             generation=generation,
