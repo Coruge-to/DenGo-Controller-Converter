@@ -1,19 +1,34 @@
-﻿
+# Python virtual environments and caches
 venv_exe/
-dist/
-build/
+venv_r2/
+.venv/
+venv/
 __pycache__/
-*.spec
+**/__pycache__/
+*.pyc
+*.pyo
 
-venv_exe/
-dist/
+# Python and PyInstaller build artifacts
 build/
+dist/
 *.spec
-__pycache__/
+!DenGoControllerConverter.spec
 
-*.zip
+# Legacy packaged output
 DenGo-Controller-Converter/
 
+# Archives
+*.zip
+*.7z
+*.rar
+
+# Test and tool caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local logs
+*.log
 
 # BVE integration local build artifacts
 bve_integration/**/bin/
@@ -21,5 +36,8 @@ bve_integration/**/obj/
 bve_integration/**/*.dll
 bve_integration/**/*.pdb
 bve_integration/local_references/
-**/__pycache__/
-*.pyc
+
+# Installer build artifacts
+installer/build/
+installer/output/
+installer/cache/

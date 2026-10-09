@@ -132,8 +132,10 @@ class BveHandleCommandPublisher:
         if os.name != "nt":
             raise RuntimeError("Named BVE handle-command mapping requires Windows")
         self.mapping_name = mapping_name
-        self._mapping = mmap.mmap(-1, MAPPING_SIZE, tagname=mapping_name)
+        self._mapping = None
+        self._mutex_handle = None
         self._sequence = 0
+        self._mapping = mmap.mmap(-1, MAPPING_SIZE, tagname=mapping_name)
         self.publish_disabled(generation=0)
 
     def publish_command(
