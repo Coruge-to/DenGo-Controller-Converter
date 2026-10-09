@@ -6,6 +6,7 @@ using System.Text;
 using System.Threading;
 using System.Windows.Forms;
 using Mackoy.Bvets;
+using Microsoft.Win32;
 
 
 namespace CorugeTo.DenGo.ControllerConverter
@@ -25,6 +26,7 @@ namespace CorugeTo.DenGo.ControllerConverter
         private const int Magic = 0x44474843;
         private const int SchemaVersion = 1;
         private const uint FileMapRead = 0x0004;
+        private const uint Synchronize = 0x00100000;
         private const long MaxAgeTicks = 2L * 10000000L;
         private const int AxisSHandle = 3;
         private const int BridgeLostNoticeMs = 500;
@@ -34,6 +36,13 @@ namespace CorugeTo.DenGo.ControllerConverter
         private const uint MbSetForeground = 0x00010000;
         private const uint MbTopMost = 0x00040000;
         private const string ProductDisplayName = "DenGo Controller Converter";
+        private const string AppMutexName = @"Local\CorugeTo.DenGo.ControllerConverter.App.v1";
+        private const string InstallRegistryKey = @"Software\Coruge-to\DenGo Controller Converter";
+        private const string LauncherPathValue = "LauncherPath";
+        private const string LauncherArgumentsValue = "LauncherArguments";
+        private const string AppMissingNoticeText =
+            "DenGo Controller Converter本体が見つかりません。\r\n" +
+            "DenGo Controller Converterを再インストールしてください。";
         private const string BveExNoticeText =
             "DenGo Controller ConverterにはBveEXが必要です。\r\n" +
             "設定 → 入力デバイス でBveEXを有効にし、BVEを再起動してください。";
@@ -44,6 +53,8 @@ namespace CorugeTo.DenGo.ControllerConverter
         private EventWaitHandle monitorStop;
         private Thread bridgeMonitorThread;
         private int noticeStarted;
+        private int appNoticeStarted;
+        private int appStartAttempted;
         private bool bridgeSeen;
         private long bridgeMissingSinceQpc;
         private int bveProcessId;
@@ -98,6 +109,7 @@ namespace CorugeTo.DenGo.ControllerConverter
             WriteLog("LOAD version=0.2.0.0 pid=" + pid);
             WriteLog("CONTRACT mapping=" + MappingName + " size=" + MappingSize);
             WriteLog("SAFETY axis=3 keyEvents=disabled reverser=untouched");
+            StartConverterIfNeeded();
         }
 
         public void SetAxisRanges(int[][] ranges)
@@ -232,6 +244,76 @@ namespace CorugeTo.DenGo.ControllerConverter
             GC.SuppressFinalize(this);
         }
 
+
+        private void StartConverterIfNeeded()
+        {
+            if (Interlocked.CompareExchange(ref appStartAttempted, 1, 0) != 0)
+            {
+                return;
+            }
+            IntPtr mutex = OpenMutex(Synchronize, false, AppMutexName);
+            if (mutex != IntPtr.Zero)
+            {
+                CloseHandle(mutex);
+                WriteLog("APP_AUTOSTART skipped reason=already-running");
+                return;
+            }
+            string launcherPath = null;
+            string launcherArguments = null;
+            try
+            {
+                using (RegistryKey key = Registry.CurrentUser.OpenSubKey(InstallRegistryKey))
+                {
+                    if (key != null)
+                    {
+                        launcherPath = key.GetValue(LauncherPathValue) as string;
+                        launcherArguments = key.GetValue(LauncherArgumentsValue) as string;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                WriteLog("APP_AUTOSTART registry-error=" + ex.GetType().Name);
+            }
+            if (String.IsNullOrWhiteSpace(launcherPath) || !File.Exists(launcherPath))
+            {
+                WriteLog("APP_AUTOSTART failed reason=launcher-not-found");
+                StartAppMissingNoticeIfNeeded();
+                return;
+            }
+            try
+            {
+                string arguments = String.IsNullOrWhiteSpace(launcherArguments)
+                    ? String.Empty
+                    : launcherArguments.Trim() + " ";
+                arguments += "--started-by bve --bve-pid " + bveProcessId;
+                ProcessStartInfo info = new ProcessStartInfo();
+                info.FileName = launcherPath;
+                info.Arguments = arguments;
+                info.WorkingDirectory = Path.GetDirectoryName(launcherPath);
+                info.UseShellExecute = false;
+                Process process = Process.Start(info);
+                WriteLog("APP_AUTOSTART started pid=" + (process == null ? 0 : process.Id));
+                if (process != null) process.Dispose();
+            }
+            catch (Exception ex)
+            {
+                WriteLog("APP_AUTOSTART failed reason=" + ex.GetType().Name + " " + ex.Message);
+                StartAppMissingNoticeIfNeeded();
+            }
+        }
+        private void StartAppMissingNoticeIfNeeded()
+        {
+            if (Interlocked.CompareExchange(ref appNoticeStarted, 1, 0) != 0) return;
+            Thread thread = new Thread(delegate()
+            {
+                MessageBoxW(IntPtr.Zero, AppMissingNoticeText, ProductDisplayName,
+                    MbOk | MbIconInformation | MbSetForeground | MbTopMost);
+            });
+            thread.IsBackground = true;
+            thread.Name = "DenGo application missing notice";
+            thread.Start();
+        }
         private void BridgeMonitorLoop()
         {
             try
@@ -534,6 +616,8 @@ namespace CorugeTo.DenGo.ControllerConverter
         [DllImport("user32.dll", EntryPoint = "MessageBoxW", CharSet = CharSet.Unicode)]
         private static extern int MessageBoxW(IntPtr hWnd, string text, string caption, uint type);
 
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern IntPtr OpenMutex(uint desiredAccess, bool inheritHandle, string name);
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         private static extern IntPtr OpenFileMapping(uint desiredAccess, bool inheritHandle, string name);
 

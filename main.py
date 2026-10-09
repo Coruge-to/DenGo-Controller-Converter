@@ -3,6 +3,7 @@ import sys
 import os
 import ctypes
 import time
+import argparse
 import pygame
 import pydirectinput
 
@@ -29,6 +30,44 @@ try:
 except:
     pass
 os.environ["SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS"] = "1"
+
+APP_MUTEX_NAME = "Local\\CorugeTo.DenGo.ControllerConverter.App.v1"
+ERROR_ALREADY_EXISTS = 183
+MB_OK = 0x00000000
+MB_ICONINFORMATION = 0x00000040
+MB_SETFOREGROUND = 0x00010000
+
+def parse_startup_args():
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--started-by", choices=("bve",), default=None)
+    parser.add_argument("--bve-pid", type=int, default=None)
+    args, _ = parser.parse_known_args()
+    return args
+
+def acquire_single_instance(startup_args):
+    kernel32 = ctypes.windll.kernel32
+    kernel32.CreateMutexW.argtypes = (ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p)
+    kernel32.CreateMutexW.restype = ctypes.c_void_p
+    handle = kernel32.CreateMutexW(None, False, APP_MUTEX_NAME)
+    if not handle:
+        raise ctypes.WinError()
+    if kernel32.GetLastError() == ERROR_ALREADY_EXISTS:
+        kernel32.CloseHandle(handle)
+        if startup_args.started_by != "bve":
+            ctypes.windll.user32.MessageBoxW(
+                None,
+                "DenGo Controller Converterは既に起動しています。",
+                "DenGo Controller Converter",
+                MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND,
+            )
+        return None
+    return handle
+
+_startup_args = parse_startup_args()
+_instance_handle = acquire_single_instance(_startup_args)
+if _instance_handle is None:
+    raise SystemExit(0)
+
 pydirectinput.PAUSE = 0
 
 game_mode = "JRETS"
@@ -574,4 +613,7 @@ def main():
     pygame.quit()
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    finally:
+        ctypes.windll.kernel32.CloseHandle(_instance_handle)
