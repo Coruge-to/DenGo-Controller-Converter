@@ -1,7 +1,9 @@
 using System;
 using System.IO;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
 using System.Windows.Forms;
 using Mackoy.Bvets;
 
@@ -13,6 +15,7 @@ namespace CorugeTo.DenGo.ControllerConverter
         private const string Prefix = @"Local\CorugeTo.DenGo.VehicleSpec.Control.v1.";
         public static string Enabled(int pid) { return Prefix + pid + ".Enabled"; }
         public static string Stop(int pid) { return Prefix + pid + ".Stop"; }
+        public static string BridgeAvailable(int pid) { return Prefix + pid + ".BridgeAvailable"; }
     }
 
     public sealed class DenGoControllerConverterInputDevice : IInputDevice, IDisposable
@@ -24,10 +27,26 @@ namespace CorugeTo.DenGo.ControllerConverter
         private const uint FileMapRead = 0x0004;
         private const long MaxAgeTicks = 2L * 10000000L;
         private const int AxisSHandle = 3;
+        private const int BridgeLostNoticeMs = 500;
+        private const int MonitorIntervalMs = 50;
+        private const uint MbOk = 0x00000000;
+        private const uint MbIconInformation = 0x00000040;
+        private const uint MbSetForeground = 0x00010000;
+        private const uint MbTopMost = 0x00040000;
+        private const string ProductDisplayName = "DenGo Controller Converter";
+        private const string BveExNoticeText =
+            "DenGo Controller ConverterにはBveEXが必要です。\r\n" +
+            "設定 → 入力デバイス でBveEXを有効にし、BVEを再起動してください。";
 
         private string logPath;
-        private System.Threading.EventWaitHandle enabled;
-        private System.Threading.EventWaitHandle stop;
+        private EventWaitHandle enabled;
+        private EventWaitHandle stop;
+        private EventWaitHandle monitorStop;
+        private Thread bridgeMonitorThread;
+        private int noticeStarted;
+        private bool bridgeSeen;
+        private long bridgeMissingSinceQpc;
+        private int bveProcessId;
         private int axis3Minimum;
         private int axis3Maximum;
         private bool axis3Available;
@@ -65,11 +84,17 @@ namespace CorugeTo.DenGo.ControllerConverter
             }
             Directory.CreateDirectory(directory);
             logPath = Path.Combine(directory, "DenGoControllerConverter.log");
-            int pid = System.Diagnostics.Process.GetCurrentProcess().Id;
-            stop = new System.Threading.EventWaitHandle(false, System.Threading.EventResetMode.ManualReset, Protocol.Stop(pid));
-            enabled = new System.Threading.EventWaitHandle(false, System.Threading.EventResetMode.ManualReset, Protocol.Enabled(pid));
+            int pid = Process.GetCurrentProcess().Id;
+            bveProcessId = pid;
+            stop = new EventWaitHandle(false, EventResetMode.ManualReset, Protocol.Stop(pid));
+            enabled = new EventWaitHandle(false, EventResetMode.ManualReset, Protocol.Enabled(pid));
+            monitorStop = new EventWaitHandle(false, EventResetMode.ManualReset);
             stop.Reset();
             enabled.Set();
+            bridgeMonitorThread = new Thread(BridgeMonitorLoop);
+            bridgeMonitorThread.IsBackground = true;
+            bridgeMonitorThread.Name = "DenGo BveEX dependency monitor";
+            bridgeMonitorThread.Start();
             WriteLog("LOAD version=0.2.0.0 pid=" + pid);
             WriteLog("CONTRACT mapping=" + MappingName + " size=" + MappingSize);
             WriteLog("SAFETY axis=3 keyEvents=disabled reverser=untouched");
@@ -91,6 +116,10 @@ namespace CorugeTo.DenGo.ControllerConverter
             WriteLog("AXIS3_RANGE available=" + axis3Available +
                 " minimum=" + axis3Minimum + " maximum=" + axis3Maximum +
                 " allRanges=" + FormatRanges(ranges));
+            if (axis3Available && !ProbeBridgeAvailable())
+            {
+                StartBveExNoticeIfStillNeeded("scenario-ready");
+            }
         }
 
         public void Tick()
@@ -124,7 +153,7 @@ namespace CorugeTo.DenGo.ControllerConverter
             long ageTicks = DateTime.UtcNow.Ticks - snapshot.UpdatedUtcTicks;
             if (ageTicks < 0 || ageTicks > MaxAgeTicks)
             {
-                LogStatus("WAIT stale ageMs=" + (ageTicks / 10000L));
+                LogStatus("WAIT stale");
                 return;
             }
             if (!snapshot.Enabled || !snapshot.Valid)
@@ -184,14 +213,123 @@ namespace CorugeTo.DenGo.ControllerConverter
                 return;
             }
             disposed = true;
+            try { if (monitorStop != null) monitorStop.Set(); } catch { }
             try { if (stop != null) stop.Set(); } catch { }
             try { if (enabled != null) enabled.Reset(); } catch { }
+            Thread monitor = bridgeMonitorThread;
+            if (monitor != null && monitor != Thread.CurrentThread)
+            {
+                try { monitor.Join(1000); } catch { }
+            }
+            bridgeMonitorThread = null;
+            if (monitorStop != null) monitorStop.Dispose();
             if (stop != null) stop.Dispose();
             if (enabled != null) enabled.Dispose();
+            monitorStop = null;
             stop = null;
             enabled = null;
             WriteLog("DISPOSE");
             GC.SuppressFinalize(this);
+        }
+
+        private void BridgeMonitorLoop()
+        {
+            try
+            {
+                while (!disposed)
+                {
+                    bool bridgePresent = ProbeBridgeAvailable();
+                    long now = Stopwatch.GetTimestamp();
+
+                    if (bridgePresent)
+                    {
+                        bridgeSeen = true;
+                        bridgeMissingSinceQpc = 0;
+                    }
+                    else if (bridgeSeen)
+                    {
+                        {
+                            if (bridgeMissingSinceQpc == 0)
+                            {
+                                bridgeMissingSinceQpc = now;
+                            }
+                            double missingMs = (now - bridgeMissingSinceQpc) * 1000.0 / Stopwatch.Frequency;
+                            if (missingMs >= BridgeLostNoticeMs)
+                            {
+                                StartBveExNoticeIfStillNeeded("connection-lost");
+                            }
+                        }
+                    }
+
+                    EventWaitHandle quit = monitorStop;
+                    if (quit == null || quit.WaitOne(MonitorIntervalMs))
+                    {
+                        break;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                WriteLog("BVEEX_MONITOR_ERROR " + ex.GetType().Name + " " + ex.Message);
+            }
+        }
+
+        private bool ProbeBridgeAvailable()
+        {
+            EventWaitHandle bridge = null;
+            try
+            {
+                if (!EventWaitHandle.TryOpenExisting(
+                    Protocol.BridgeAvailable(bveProcessId),
+                    System.Security.AccessControl.EventWaitHandleRights.Synchronize,
+                    out bridge))
+                {
+                    return false;
+                }
+                return bridge.WaitOne(0);
+            }
+            catch
+            {
+                return false;
+            }
+            finally
+            {
+                if (bridge != null) bridge.Dispose();
+            }
+        }
+
+        private void StartBveExNoticeIfStillNeeded(string trigger)
+        {
+            if (Interlocked.CompareExchange(ref noticeStarted, 1, 0) != 0)
+            {
+                return;
+            }
+
+            Thread noticeThread = new Thread(delegate()
+            {
+                try
+                {
+                    if (disposed || ProbeBridgeAvailable())
+                    {
+                        WriteLog("BVEEX_NOTICE_SUPPRESSED trigger=" + trigger);
+                        return;
+                    }
+
+                    WriteLog("BVEEX_NOTICE_SHOWN trigger=" + trigger);
+                    MessageBoxW(
+                        IntPtr.Zero,
+                        BveExNoticeText,
+                        ProductDisplayName,
+                        MbOk | MbIconInformation | MbSetForeground | MbTopMost);
+                }
+                catch (Exception ex)
+                {
+                    WriteLog("BVEEX_NOTICE_ERROR " + ex.GetType().Name + " " + ex.Message);
+                }
+            });
+            noticeThread.IsBackground = true;
+            noticeThread.Name = "DenGo BveEX dependency notice";
+            noticeThread.Start();
         }
 
         private static bool TryResolveAxis3Value(
@@ -392,6 +530,9 @@ namespace CorugeTo.DenGo.ControllerConverter
             internal int AutoBrakePosition;
             internal long UpdatedUtcTicks;
         }
+
+        [DllImport("user32.dll", EntryPoint = "MessageBoxW", CharSet = CharSet.Unicode)]
+        private static extern int MessageBoxW(IntPtr hWnd, string text, string caption, uint type);
 
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         private static extern IntPtr OpenFileMapping(uint desiredAccess, bool inheritHandle, string name);
