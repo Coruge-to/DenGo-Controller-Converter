@@ -1,9 +1,19 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+from importlib.metadata import distribution
+from pathlib import Path
+
+vgamepad_root = Path(distribution('vgamepad').locate_file('vgamepad')).resolve()
+vigem_client_x64 = vgamepad_root / 'win' / 'vigem' / 'client' / 'x64' / 'ViGEmClient.dll'
+if not vigem_client_x64.is_file():
+    raise FileNotFoundError(str(vigem_client_x64))
+
 a = Analysis(
     ['main.py'],
     pathex=[],
-    binaries=[],
+    binaries=[
+        (str(vigem_client_x64), 'vgamepad/win/vigem/client/x64'),
+    ],
     datas=[('DenGo-Controller-Converter.ico', '.')],
     hiddenimports=['vgamepad'],
     hookspath=[],
@@ -14,7 +24,6 @@ a = Analysis(
     optimize=0,
 )
 pyz = PYZ(a.pure)
-
 exe = EXE(
     pyz,
     a.scripts,
