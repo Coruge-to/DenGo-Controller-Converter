@@ -53,15 +53,15 @@ class Rpcs3Logic(BaseLogic):
             # --- パターンA: Pからブレーキへ直接移動した時 ---
             if cur_axis < 0 and self.prev_axis > 0:
                 if self.prev_axis == 5:
-                    self.sender.key_up(KEY_PCSX2_POWER_INC) # zを離す
+                    self.sender.key_up(KEY_RPCS3_POWER_INC) # zを離す
                     time.sleep(0.05) # ★リリース・ガード
-                self.press_emu(KEY_PCSX2_N)
+                self.press_emu(KEY_RPCS3_N)
                 time.sleep(PCSX2_RESET_WAIT)
                 self.prev_axis = 0
             
             # --- パターンB: P5からP4以下(N含む)へ移動した時 ---
             elif self.prev_axis == 5 and cur_axis < 5:
-                self.sender.key_up(KEY_PCSX2_POWER_INC) # zを離す
+                self.sender.key_up(KEY_RPCS3_POWER_INC) # zを離す
                 # ★リリース・ガード：ここで50ms待つことで、
                 # 次の「軸移動ロジック」で送られる q や s との重なりを防ぐ
                 time.sleep(0.05) 
@@ -73,8 +73,8 @@ class Rpcs3Logic(BaseLogic):
                     # P1-P4からP5へ上がってきた場合、差分を埋めてから長押し開始
                     diff = 4 - max(0, self.prev_axis)
                     if diff > 0:
-                        for _ in range(diff): self.press_emu(KEY_PCSX2_POWER_INC)
-                    self.sender.key_down(KEY_PCSX2_POWER_INC) # zを押しっぱなしにする
+                        for _ in range(diff): self.press_emu(KEY_RPCS3_POWER_INC)
+                    self.sender.key_down(KEY_RPCS3_POWER_INC) # zを押しっぱなしにする
                     self.prev_axis = 5
                 self._handle_buttons(raw_btns, is_keihan)
                 return
@@ -85,41 +85,41 @@ class Rpcs3Logic(BaseLogic):
         if cur_axis != self.prev_axis:
             # Nへの復帰 (sキー)
             if cur_axis == 0 and self.prev_axis != 0:
-                self.press_emu(KEY_PCSX2_N)
+                self.press_emu(KEY_RPCS3_N)
                 time.sleep(PCSX2_RESET_WAIT)
 
             # 力行⇔ブレーキの境界またぎ
             elif (cur_axis > 0 and self.prev_axis < 0) or (cur_axis < 0 and self.prev_axis > 0):
-                self.press_emu(KEY_PCSX2_N)
+                self.press_emu(KEY_RPCS3_N)
                 time.sleep(PCSX2_RESET_WAIT)
                 steps = abs(cur_axis)
                 if cur_axis > 0:
-                    for _ in range(steps): self.press_emu(KEY_PCSX2_POWER_INC)
+                    for _ in range(steps): self.press_emu(KEY_RPCS3_POWER_INC)
                 else:
                     if brake_mode == "1":
-                        for _ in range(steps): self.press_emu(KEY_PCSX2_POWER_DEC)
+                        for _ in range(steps): self.press_emu(KEY_RPCS3_POWER_DEC)
                     else:
-                        for _ in range(steps): self.press_emu(KEY_PCSX2_BRAKE_INC)
+                        for _ in range(steps): self.press_emu(KEY_RPCS3_BRAKE_INC)
             
             # 同一象限内の移動 (P同士 or B同士)
             else:
                 diff = cur_axis - self.prev_axis
                 if diff > 0: # +方向 (P増 or B減)
                     if cur_axis > 0:
-                        for _ in range(abs(diff)): self.press_emu(KEY_PCSX2_POWER_INC)
+                        for _ in range(abs(diff)): self.press_emu(KEY_RPCS3_POWER_INC)
                     else:
                         if brake_mode == "1":
-                            for _ in range(abs(diff)): self.press_emu(KEY_PCSX2_POWER_INC)
+                            for _ in range(abs(diff)): self.press_emu(KEY_RPCS3_POWER_INC)
                         else:
-                            for _ in range(abs(diff)): self.press_emu(KEY_PCSX2_BRAKE_DEC)
+                            for _ in range(abs(diff)): self.press_emu(KEY_RPCS3_BRAKE_DEC)
                 elif diff < 0: # -方向 (P減 or B増)
                     if cur_axis > 0:
-                        for _ in range(abs(diff)): self.press_emu(KEY_PCSX2_POWER_DEC)
+                        for _ in range(abs(diff)): self.press_emu(KEY_RPCS3_POWER_DEC)
                     else:
                         if brake_mode == "1":
-                            for _ in range(abs(diff)): self.press_emu(KEY_PCSX2_POWER_DEC)
+                            for _ in range(abs(diff)): self.press_emu(KEY_RPCS3_POWER_DEC)
                         else:
-                            for _ in range(abs(diff)): self.press_emu(KEY_PCSX2_BRAKE_INC)
+                            for _ in range(abs(diff)): self.press_emu(KEY_RPCS3_BRAKE_INC)
             
             self.prev_axis = cur_axis
         
@@ -128,10 +128,10 @@ class Rpcs3Logic(BaseLogic):
     def _handle_buttons(self, raw_btns, is_keihan):
         is_st, is_sl = (raw_btns[9]==1), (raw_btns[10]==1)
         if is_sl != self.p_select:
-            self.sender.key_down(KEY_PCSX2_HORN1) if is_sl else self.sender.key_up(KEY_PCSX2_HORN1)
+            self.sender.key_down(KEY_RPCS3_HORN1) if is_sl else self.sender.key_up(KEY_RPCS3_HORN1)
             if is_keihan:
                 self.sender.key_down('e') if is_sl else self.sender.key_up('e')
             self.p_select = is_sl
         if is_st != self.p_start:
-            self.sender.key_down(KEY_PCSX2_HORN2) if is_st else self.sender.key_up(KEY_PCSX2_HORN2)
+            self.sender.key_down(KEY_RPCS3_HORN2) if is_st else self.sender.key_up(KEY_RPCS3_HORN2)
             self.p_start = is_st

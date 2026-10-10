@@ -56,14 +56,13 @@ KEY_START, KEY_SELECT, KEY_START_BVE = 'backspace', 'enter',  'add'
 
 
 # --- キーアサイン (PCSX2/RPCS3) ---
-KEY_PCSX2_POWER_INC = 'z' # マスコン増 / ハンドル奥へ
-KEY_PCSX2_POWER_DEC = 'q' # マスコン減 / ハンドル手前へ
-KEY_PCSX2_BRAKE_INC = '.' # ツーハン ブレーキ増 (通常)
-KEY_PCSX2_BRAKE_DEC = ',' # ツーハン ブレーキ減 (通常)
-KEY_PCSX2_N         = 's' # マスコン切 (N) ショートカット
-KEY_PCSX2_EMG       = '/' # 非常ブレーキ (PCSX2専用)
-KEY_PCSX2_HORN1     = 'enter'     # SELECT
-KEY_PCSX2_HORN2     = 'backspace' # START
+KEY_RPCS3_POWER_INC = 'z' # マスコン増 / ハンドル奥へ
+KEY_RPCS3_POWER_DEC = 'q' # マスコン減 / ハンドル手前へ
+KEY_RPCS3_BRAKE_INC = '.' # ツーハン ブレーキ増 (通常)
+KEY_RPCS3_BRAKE_DEC = ',' # ツーハン ブレーキ減 (通常)
+KEY_RPCS3_N         = 's' # マスコン切 (N) ショートカット
+KEY_RPCS3_HORN1     = 'enter'     # SELECT
+KEY_RPCS3_HORN2     = 'backspace' # START
 
 # --- Virtual gamepad contract for PCSX2 ---
 VGPAD_PCSX2_POWER_INC = 'dpad_down'
