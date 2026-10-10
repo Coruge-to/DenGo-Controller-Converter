@@ -568,6 +568,8 @@ def main():
             "mode_787": mode_787 
         }
         if game_mode == "BVE":
+            if can_send_input:
+                logics["BVE"].update_buttons(raw_btns)
             source_ready = can_send_input and vehicle_spec is not None and bve_spec_receiver.source_enabled
             source_valid = source_ready and bve_spec_receiver.source_valid
             writer_process_id = None if vehicle_spec is None else vehicle_spec.writer_process_id
