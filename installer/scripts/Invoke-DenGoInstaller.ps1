@@ -3,7 +3,8 @@ param(
     [switch]$Apply,
     [string]$TestRoot = '',
     [switch]$RealSystem,
-    [string]$ConfirmRealApply = ''
+    [string]$ConfirmRealApply = '',
+    [switch]$AdditionalSearch
 )
 
 $ErrorActionPreference = 'Stop'
@@ -80,6 +81,87 @@ function Get-Platform {
     if ([string]::Equals($Name,'rpcs3.exe',[System.StringComparison]::OrdinalIgnoreCase)) { return 'RPCS3' }
     if ($Name -match '(?i)\Apcsx2[^\\/]*[.]exe\z') { return 'PCSX2' }
     return ''
+}
+
+function Get-DefaultExecutableCandidates {
+    $result = New-Object System.Collections.ArrayList
+    $paths = @(
+        [pscustomobject]@{Platform='BVE';Path='C:\Program Files\mackoy\BveTs6\BveTs.exe'},
+        [pscustomobject]@{Platform='BVE';Path='C:\Program Files (x86)\mackoy\BveTs5\BveTs.exe'},
+        [pscustomobject]@{Platform='PCSX2';Path=(Join-Path $env:ProgramFiles 'PCSX2\pcsx2-qt.exe')},
+        [pscustomobject]@{Platform='PCSX2';Path=(Join-Path $env:ProgramFiles 'PCSX2\pcsx2.exe')},
+        [pscustomobject]@{Platform='PCSX2';Path=(Join-Path ${env:ProgramFiles(x86)} 'PCSX2\pcsx2.exe')},
+        [pscustomobject]@{Platform='RPCS3';Path=(Join-Path $env:LOCALAPPDATA 'Programs\RPCS3\rpcs3.exe')},
+        [pscustomobject]@{Platform='RPCS3';Path=(Join-Path $env:ProgramFiles 'RPCS3\rpcs3.exe')}
+    )
+    foreach ($item in $paths) {
+        if ([System.IO.File]::Exists([string]$item.Path)) { [void]$result.Add($item) }
+    }
+    return [object[]]@($result)
+}
+
+function Add-ShortcutExecutable {
+    param([System.Collections.ArrayList]$List,[string]$Scope,[string]$ShortcutPath,[object]$Shell)
+    try {
+        $shortcut = $Shell.CreateShortcut($ShortcutPath)
+        $targetPath = [string]$shortcut.TargetPath
+        $targetName = [System.IO.Path]::GetFileName($targetPath)
+        $platform = Get-Platform $targetName
+        if (-not [string]::IsNullOrWhiteSpace($platform)) {
+            Add-Executable $List $platform $targetPath ($Scope + ':' + $ShortcutPath) ([string]$shortcut.Arguments)
+            return
+        }
+        $shortcutName = [System.IO.Path]::GetFileNameWithoutExtension($ShortcutPath)
+        $workingDirectory = [string]$shortcut.WorkingDirectory
+        if ($shortcutName -match '(?i)bve\s*(?:trainsim)?\s*[56]?' -and -not [string]::IsNullOrWhiteSpace($workingDirectory)) {
+            $bveCandidate = Join-Path $workingDirectory 'BveTs.exe'
+            if ([System.IO.File]::Exists($bveCandidate)) { Add-Executable $List 'BVE' $bveCandidate ($Scope + '-Advertised:' + $ShortcutPath) '' }
+        }
+    } catch {
+    }
+}
+
+function Add-ShortcutRootExecutables {
+    param([System.Collections.ArrayList]$List,[string]$Scope,[string]$Root,[bool]$Recurse,[object]$Shell)
+    if (-not [System.IO.Directory]::Exists($Root)) { return }
+    $files = if ($Recurse) {
+        @(Get-ChildItem -LiteralPath $Root -Recurse -File -ErrorAction SilentlyContinue)
+    } else {
+        @(Get-ChildItem -LiteralPath $Root -File -ErrorAction SilentlyContinue)
+    }
+    foreach ($file in @($files | Where-Object { [string]::Equals($_.Extension,'.lnk',[System.StringComparison]::OrdinalIgnoreCase) })) {
+        Add-ShortcutExecutable $List $Scope $file.FullName $Shell
+    }
+}
+
+function Add-FixedDriveExecutables {
+    param([System.Collections.ArrayList]$List,[int]$MaxSecondsPerDrive)
+    $drives = @([System.IO.DriveInfo]::GetDrives() | Where-Object { $_.DriveType -eq [System.IO.DriveType]::Fixed -and $_.IsReady })
+    foreach ($drive in $drives) {
+        $deadline = [System.Environment]::TickCount + ($MaxSecondsPerDrive * 1000)
+        $pending = New-Object System.Collections.ArrayList
+        [void]$pending.Add($drive.RootDirectory.FullName)
+        while (@($pending).Count -gt 0 -and [System.Environment]::TickCount -lt $deadline) {
+            $lastIndex = @($pending).Count - 1
+            $directory = [string]$pending[$lastIndex]
+            $pending.RemoveAt($lastIndex)
+            try {
+                foreach ($fileName in @('BveTs.exe','rpcs3.exe')) {
+                    $path = Join-Path $directory $fileName
+                    if ([System.IO.File]::Exists($path)) { Add-Executable $List (Get-Platform $fileName) $path ('AdditionalFixedDriveSearch:' + $drive.Name) '' }
+                }
+                foreach ($path in @([System.IO.Directory]::GetFiles($directory,'pcsx2*.exe',[System.IO.SearchOption]::TopDirectoryOnly))) {
+                    $name = [System.IO.Path]::GetFileName($path)
+                    if ($name -match '(?i)\Apcsx2[^\\/]*[.]exe\z') { Add-Executable $List 'PCSX2' $path ('AdditionalFixedDriveSearch:' + $drive.Name) '' }
+                }
+                foreach ($child in @([System.IO.Directory]::GetDirectories($directory))) {
+                    $name = [System.IO.Path]::GetFileName($child)
+                    if ($name -notin @('$Recycle.Bin','System Volume Information','WindowsApps')) { [void]$pending.Add($child) }
+                }
+            } catch {
+            }
+        }
+    }
 }
 
 function Convert-ToSandboxDestination {
@@ -219,42 +301,36 @@ $sources = @{
 foreach ($entry in $sources.GetEnumerator()) { if (-not [System.IO.File]::Exists([string]$entry.Value)) { throw ("Source missing: {0}" -f $entry.Value) } }
 
 $candidates = New-Object System.Collections.ArrayList
+foreach ($item in @(Get-DefaultExecutableCandidates)) { Add-Executable $candidates ([string]$item.Platform) ([string]$item.Path) 'DefaultLocation' '' }
+
+$shell = New-Object -ComObject WScript.Shell
+Add-ShortcutRootExecutables $candidates 'TaskbarPinned' (Join-Path $env:APPDATA 'Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar') $false $shell
+Add-ShortcutRootExecutables $candidates 'UserDesktop' ([System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::Desktop)) $true $shell
+Add-ShortcutRootExecutables $candidates 'CommonDesktop' ([System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::CommonDesktopDirectory)) $true $shell
+Add-ShortcutRootExecutables $candidates 'UserStartMenu' ([System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::StartMenu)) $true $shell
+Add-ShortcutRootExecutables $candidates 'CommonStartMenu' ([System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::CommonStartMenu)) $true $shell
+
 $processes = @(Get-CimInstance Win32_Process | Where-Object { $_.Name -match '(?i)\A(?:bvets|rpcs3|pcsx2[^\\/]*)[.]exe\z' })
 foreach ($process in $processes) { Add-Executable $candidates (Get-Platform ([string]$process.Name)) ([string]$process.ExecutablePath) 'RunningProcess' ([string]$process.CommandLine) }
 
-$shell = New-Object -ComObject WScript.Shell
-$shortcutRoots = @(
-    [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::Desktop),
-    [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::StartMenu),
-    [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::CommonStartMenu)
-)
-foreach ($root in $shortcutRoots) {
-    if (-not [System.IO.Directory]::Exists($root)) { continue }
-    foreach ($link in @(Get-ChildItem -LiteralPath $root -Recurse -File -ErrorAction SilentlyContinue | Where-Object { [string]::Equals($_.Extension,'.lnk',[System.StringComparison]::OrdinalIgnoreCase) })) {
-        $shortcut = $shell.CreateShortcut($link.FullName)
-        $platform = Get-Platform ([System.IO.Path]::GetFileName([string]$shortcut.TargetPath))
-        if (-not [string]::IsNullOrWhiteSpace($platform)) { Add-Executable $candidates $platform ([string]$shortcut.TargetPath) ('Shortcut:' + $link.FullName) ([string]$shortcut.Arguments) }
-    }
-}
-
-$searchRoots = @(
+$commonRoots = @(
     [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::MyDocuments),
     (Join-Path $env:USERPROFILE 'Downloads'),
     [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::Desktop),
-    (Join-Path $env:LOCALAPPDATA 'Programs'),
-    'C:\Program Files',
-    'C:\Program Files (x86)'
+    (Join-Path $env:LOCALAPPDATA 'Programs')
 )
-foreach ($root in $searchRoots) {
+foreach ($root in $commonRoots) {
     if (-not [System.IO.Directory]::Exists($root)) { continue }
     foreach ($file in @(Get-ChildItem -LiteralPath $root -Recurse -File -ErrorAction SilentlyContinue | Where-Object {
         [string]::Equals($_.Name,'BveTs.exe',[System.StringComparison]::OrdinalIgnoreCase) -or
         [string]::Equals($_.Name,'rpcs3.exe',[System.StringComparison]::OrdinalIgnoreCase) -or
         $_.Name -match '(?i)\Apcsx2[^\\/]*[.]exe\z'
     })) {
-        Add-Executable $candidates (Get-Platform $file.Name) $file.FullName ('LimitedSearch:' + $root) ''
+        Add-Executable $candidates (Get-Platform $file.Name) $file.FullName ('CommonRoot:' + $root) ''
     }
 }
+
+if ($AdditionalSearch) { Add-FixedDriveExecutables $candidates 120 }
 
 $detected = New-Object System.Collections.ArrayList
 foreach ($candidate in $candidates) {
@@ -314,7 +390,7 @@ if ($Apply -and $RealSystem) {
 } elseif ($Apply) {
     $applyResults = Invoke-SandboxApply ([object[]]@($plan)) $TestRoot
 }
-$result=[pscustomobject]@{SchemaVersion=3;Generated=[System.DateTimeOffset]::Now.ToString('o');DryRun=[bool]$DryRun;Apply=[bool]$Apply;RealSystem=[bool]$RealSystem;TestRoot=$TestRoot;BackupRoot=$backupRoot;Detected=[object[]]@($detected);Plan=[object[]]@($plan);ApplyResults=[object[]]@($applyResults)}
+$result=[pscustomobject]@{SchemaVersion=4;Generated=[System.DateTimeOffset]::Now.ToString('o');DryRun=[bool]$DryRun;Apply=[bool]$Apply;RealSystem=[bool]$RealSystem;AdditionalSearch=[bool]$AdditionalSearch;TestRoot=$TestRoot;BackupRoot=$backupRoot;Detected=[object[]]@($detected);Plan=[object[]]@($plan);ApplyResults=[object[]]@($applyResults)}
 [System.IO.File]::WriteAllText($jsonOutput,($result | ConvertTo-Json -Depth 9),(New-Object System.Text.UTF8Encoding($true)))
 $lines=New-Object System.Collections.ArrayList
 [void]$lines.Add('DenGo installer formal preview plan')
