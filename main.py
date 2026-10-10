@@ -4,6 +4,9 @@ import os
 import ctypes
 import time
 import argparse
+import queue
+import threading
+import webbrowser
 import pygame
 import pydirectinput
 
@@ -23,6 +26,7 @@ from bve_handle_ipc import BveHandleCommandPublisher
 from platform_detection import EfficientPlatformDetector
 from window_message_backend import WindowMessageBackend, WindowTarget
 from virtual_gamepad_backend import VirtualGamepadBackend
+from update_checker import CURRENT_VERSION, check_latest_release
 
 try:
     myappid = 'my.dengo.converter.v21.ux_improved'
@@ -36,6 +40,13 @@ ERROR_ALREADY_EXISTS = 183
 MB_OK = 0x00000000
 MB_ICONINFORMATION = 0x00000040
 MB_SETFOREGROUND = 0x00010000
+MB_YESNO = 0x00000004
+IDYES = 6
+
+def _check_for_updates_worker(result_queue):
+    result = check_latest_release()
+    if result is not None:
+        result_queue.put(result)
 
 def parse_startup_args():
     parser = argparse.ArgumentParser(add_help=False)
@@ -234,6 +245,9 @@ def main():
 
     screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
     clock = pygame.time.Clock()
+    update_results = queue.Queue(maxsize=1)
+    update_notice_shown = False
+    threading.Thread(target=_check_for_updates_worker, args=(update_results,), daemon=True).start()
     ui.init_fonts()
 
     pygame.joystick.init()
@@ -324,6 +338,25 @@ def main():
             for btn in all_btns:
                 btn.handle_event(event)
 
+        if not update_notice_shown:
+            try:
+                update_info = update_results.get_nowait()
+            except queue.Empty:
+                update_info = None
+            if update_info is not None:
+                update_notice_shown = True
+                message = (
+                    "\u65b0\u3057\u3044\u30d0\u30fc\u30b8\u30e7\u30f3 " + update_info.tag_name
+                    + " \u304c\u516c\u958b\u3055\u308c\u3066\u3044\u307e\u3059\u3002\n\n"
+                    + "\u73fe\u5728\u306e\u30d0\u30fc\u30b8\u30e7\u30f3: v" + CURRENT_VERSION
+                    + "\n\n\u516c\u958b\u30da\u30fc\u30b8\u3092\u958b\u304d\u307e\u3059\u304b\uff1f"
+                )
+                answer = ctypes.windll.user32.MessageBoxW(
+                    None, message, "DenGo Controller Converter",
+                    MB_YESNO | MB_ICONINFORMATION | MB_SETFOREGROUND,
+                )
+                if answer == IDYES:
+                    webbrowser.open(update_info.release_url)
         platform_statuses=platform_detector.update()
         running_platforms=tuple(s for s in platform_statuses if s.running)
         platform_count=sum(len(s.process_ids) for s in running_platforms)
