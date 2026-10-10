@@ -35,4 +35,5 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon=['DenGo-Controller-Converter.ico'],
+    version='DenGoControllerConverter-version.txt',
 )
