@@ -1,10 +1,13 @@
-param(
+﻿param(
     [switch]$DryRun,
     [switch]$Apply,
     [string]$TestRoot = '',
     [switch]$RealSystem,
     [string]$ConfirmRealApply = '',
-    [switch]$AdditionalSearch
+    [switch]$AdditionalSearch,
+    [switch]$ReplaceModifiedPCSX2Profile,
+    [switch]$ReplaceModifiedRPCS3Profile,
+    [string]$OutputRoot = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -35,7 +38,13 @@ $installerRoot = [System.IO.Path]::GetFullPath((Join-Path $scriptRoot '..'))
 $repo = [System.IO.Path]::GetFullPath((Join-Path $installerRoot '..'))
 $payload = Join-Path $installerRoot 'build\payload'
 $assets = Join-Path $installerRoot 'assets\input-profiles'
-$outputRoot = Join-Path $env:TEMP 'DenGoInstallerPreview'
+if ([string]::IsNullOrWhiteSpace($OutputRoot)) {
+    $outputRoot = Join-Path $env:TEMP 'DenGoInstallerPreview'
+} else {
+    $outputRoot = [System.IO.Path]::GetFullPath($OutputRoot)
+    $tempPrefix = [System.IO.Path]::GetFullPath($env:TEMP).TrimEnd([char[]]@('\','/')) + [System.IO.Path]::DirectorySeparatorChar
+    if (-not $outputRoot.StartsWith($tempPrefix,[System.StringComparison]::OrdinalIgnoreCase)) { throw 'OutputRoot must be under the current TEMP directory.' }
+}
 $textOutput = Join-Path $outputRoot 'install-plan.txt'
 $jsonOutput = Join-Path $outputRoot 'install-plan.json'
 
@@ -381,6 +390,12 @@ if ([System.IO.Directory]::Exists($legacyDir)) {
 if (@($pcsx2).Count -eq 1) { [void]$plan.Add((New-PlanItem 'PCSX2' 'InputProfile' $sources.PCSX2Profile (Join-Path ([string]$pcsx2[0].ProfileDirectory) 'DenGo-Controller-Converter.lily') $false $true)) }
 if (@($rpcs3).Count -eq 1) { [void]$plan.Add((New-PlanItem 'RPCS3' 'InputProfile' $sources.RPCS3Profile (Join-Path ([string]$rpcs3[0].ProfileDirectory) 'Den-Go-Controller.yml') $false $true)) }
 
+foreach ($item in @($plan)) {
+    if ([string]::Equals([string]$item.Action,'PreserveUserModified',[System.StringComparison]::Ordinal)) {
+        if ([string]::Equals([string]$item.Platform,'PCSX2',[System.StringComparison]::Ordinal) -and $ReplaceModifiedPCSX2Profile) { $item.Action = 'UpdateOrRepair' }
+        if ([string]::Equals([string]$item.Platform,'RPCS3',[System.StringComparison]::Ordinal) -and $ReplaceModifiedRPCS3Profile) { $item.Action = 'UpdateOrRepair' }
+    }
+}
 $applyResults = [object[]]@()
 $backupRoot = ''
 if ($Apply -and $RealSystem) {
@@ -390,7 +405,7 @@ if ($Apply -and $RealSystem) {
 } elseif ($Apply) {
     $applyResults = Invoke-SandboxApply ([object[]]@($plan)) $TestRoot
 }
-$result=[pscustomobject]@{SchemaVersion=4;Generated=[System.DateTimeOffset]::Now.ToString('o');DryRun=[bool]$DryRun;Apply=[bool]$Apply;RealSystem=[bool]$RealSystem;AdditionalSearch=[bool]$AdditionalSearch;TestRoot=$TestRoot;BackupRoot=$backupRoot;Detected=[object[]]@($detected);Plan=[object[]]@($plan);ApplyResults=[object[]]@($applyResults)}
+$result=[pscustomobject]@{SchemaVersion=5;Generated=[System.DateTimeOffset]::Now.ToString('o');DryRun=[bool]$DryRun;Apply=[bool]$Apply;RealSystem=[bool]$RealSystem;AdditionalSearch=[bool]$AdditionalSearch;TestRoot=$TestRoot;OutputRoot=$outputRoot;BackupRoot=$backupRoot;ReplacementDecisions=[pscustomobject]@{PCSX2=[bool]$ReplaceModifiedPCSX2Profile;RPCS3=[bool]$ReplaceModifiedRPCS3Profile};Detected=[object[]]@($detected);Plan=[object[]]@($plan);ApplyResults=[object[]]@($applyResults)}
 [System.IO.File]::WriteAllText($jsonOutput,($result | ConvertTo-Json -Depth 9),(New-Object System.Text.UTF8Encoding($true)))
 $lines=New-Object System.Collections.ArrayList
 [void]$lines.Add('DenGo installer formal preview plan')

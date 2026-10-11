@@ -1,5 +1,5 @@
 ﻿param(
-    [ValidateSet('Normal','Symbols','PCSX2Conflict','RPCS3Conflict','BothConflicts','previewPlan','利用可能','welcomeImagePath','PictureBox','標準設定で置き換えますか？','Add_FormClosed','New-Object System.Drawing.Bitmap')]
+    [ValidateSet('Normal','Symbols','PCSX2Conflict','RPCS3Conflict','BothConflicts')]
     [string]$Preview = 'Normal'
 )
 $ErrorActionPreference = 'Stop'
@@ -11,7 +11,8 @@ $root = [System.IO.Path]::GetFullPath((Join-Path ([System.IO.Path]::GetDirectory
 $engine = Join-Path $root 'scripts\Invoke-DenGoInstaller.ps1'
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $root '..'))
 $welcomeImagePath = Join-Path $repoRoot 'DenGo-Controller-Converter2.png'
-$planPath = Join-Path $env:TEMP 'DenGoInstallerPreview\install-plan.json'
+$script:runRoot = Join-Path $env:TEMP ('DenGoInstallerGui-' + [System.Guid]::NewGuid().ToString('N'))
+$planPath = Join-Path $script:runRoot 'install-plan.json'
 $script:process = $null
 $script:plan = $null
 $script:conflicts = @()
@@ -211,7 +212,9 @@ function Start-ConflictPreview([string[]]$Names) {
 }
 
 $timer=New-Object System.Windows.Forms.Timer;$timer.Interval=35
-function Start-Detection([bool]$Additional){Set-Page 'progress';$progressText.Text=if($Additional){'追加の環境を検索しています'}else{'対応ソフトを検出しています'};$progressHint.Text=if($Additional){'検索には時間がかかる場合があります'}else{'しばらくお待ちください'};$script:barX=1;$script:barStep=7;$block.Left=1;$args=@('-NoProfile','-ExecutionPolicy','Bypass','-File',$engine,'-DryRun');if($Additional){$args+='-AdditionalSearch'};$script:process=Start-Process powershell.exe -ArgumentList $args -PassThru -WindowStyle Hidden;$timer.Start()}
+function Start-Detection([bool]$Additional){Set-Page 'progress';$progressText.Text=if($Additional){'追加の環境を検索しています'}else{'対応ソフトを検出しています'};$progressHint.Text=if($Additional){'検索には時間がかかる場合があります'}else{'しばらくお待ちください'};$script:barX=1;$script:barStep=7;$block.Left=1;if ([System.IO.Directory]::Exists($script:runRoot)) { Remove-Item -LiteralPath $script:runRoot -Recurse -Force }
+[System.IO.Directory]::CreateDirectory($script:runRoot) | Out-Null
+$args=@('-NoProfile','-ExecutionPolicy','Bypass','-File',$engine,'-DryRun','-OutputRoot',$script:runRoot);if($Additional){$args+='-AdditionalSearch'};$script:process=Start-Process powershell.exe -ArgumentList $args -PassThru -WindowStyle Hidden;$timer.Start()}
 $timer.Add_Tick({$limit=$track.ClientSize.Width-$block.Width-2;$script:barX+=$script:barStep;if($script:barX-ge$limit){$script:barX=$limit;$script:barStep=-7};if($script:barX-le1){$script:barX=1;$script:barStep=7};$block.Left=$script:barX;if($null-eq$script:process-or-not$script:process.HasExited){return};$timer.Stop();$code=$script:process.ExitCode;$script:process.Dispose();$script:process=$null;if($code-ne0-or-not[System.IO.File]::Exists($planPath)){[System.Windows.Forms.MessageBox]::Show('処理に失敗しました','DenGo セットアップ')|Out-Null;Set-Page 'welcome';return};$script:plan=[System.IO.File]::ReadAllText($planPath,[System.Text.Encoding]::UTF8)|ConvertFrom-Json;$script:conflicts=@();foreach($n in @('PCSX2','RPCS3')){if(Has-Conflict $n){$script:conflicts+=$n}};$script:conflictIndex=0;$script:decisions=@{};Show-Conflict})
 $next.Add_Click({Start-Detection $false});$search.Add_Click({Start-Detection $true});$cancel.Add_Click({$form.Close()});$finish.Add_Click({if($result.Visible){Set-Page 'complete'}elseif($complete.Visible){$form.Close()}});$useExisting.Add_Click({Resolve-Conflict 'keep'});$replaceSetting.Add_Click({Resolve-Conflict 'replace'})
 $form.Add_FormClosing({if($null-ne$script:process-and-not$script:process.HasExited){$_.Cancel=$true}})
