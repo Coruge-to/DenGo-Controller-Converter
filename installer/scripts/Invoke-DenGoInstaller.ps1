@@ -41,6 +41,9 @@ $installerRoot = [System.IO.Path]::GetFullPath((Join-Path $scriptRoot '..'))
 $repo = [System.IO.Path]::GetFullPath((Join-Path $installerRoot '..'))
 $payload = Join-Path $installerRoot 'build\payload'
 $assets = Join-Path $installerRoot 'assets\input-profiles'
+$installerStateRoot = Join-Path $env:LOCALAPPDATA 'DenGo Controller Converter\InstallerState'
+$installMarker = Join-Path $installerStateRoot 'installing.json'
+$interruptedInstallDetected = [System.IO.File]::Exists($installMarker)
 if ([string]::IsNullOrWhiteSpace($OutputRoot)) {
     $outputRoot = Join-Path $env:TEMP 'DenGoInstallerPreview'
 } else {
@@ -95,6 +98,28 @@ function Get-Platform {
     return ''
 }
 
+function Get-SteamUrlProducts {
+    $result = New-Object System.Collections.ArrayList
+    $roots = @(
+        (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Steam'),
+        (Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\Steam')
+    )
+    foreach ($root in $roots) {
+        if (-not [System.IO.Directory]::Exists($root)) { continue }
+        foreach ($file in @(Get-ChildItem -LiteralPath $root -File -Recurse -Filter '*.url' -ErrorAction SilentlyContinue)) {
+            try {
+                $text = [System.IO.File]::ReadAllText($file.FullName,[System.Text.Encoding]::Default)
+                if ($text -match '(?im)^URL=steam://rungameid/2111630\s*$') {
+                    [void]$result.Add([pscustomobject]@{Platform='Steam';Mode='JRETS';Executable=$file.FullName;State='Detected';DetectionSource='SteamUrlShortcut'})
+                } elseif ($text -match '(?im)^URL=steam://rungameid/4630570\s*$') {
+                    [void]$result.Add([pscustomobject]@{Platform='Steam';Mode='RUNNINGTRAIN';Executable=$file.FullName;State='Detected';DetectionSource='SteamUrlShortcut'})
+                }
+            } catch {
+            }
+        }
+    }
+    return [object[]]@($result)
+}
 function Get-DefaultExecutableCandidates {
     $result = New-Object System.Collections.ArrayList
     $paths = @(
@@ -312,6 +337,18 @@ function Invoke-RealApplySet {
     }
 }
 
+function Remove-InstallerTemporaryFiles {
+    param([object[]]$Plan)
+    foreach ($item in @($Plan)) {
+        $temporary = ([string]$item.Destination) + '.dengo.tmp'
+        if ([System.IO.File]::Exists($temporary)) { [System.IO.File]::Delete($temporary) }
+    }
+}
+function Write-InstallMarker {
+    [System.IO.Directory]::CreateDirectory($installerStateRoot) | Out-Null
+    $state = [pscustomobject][ordered]@{SchemaVersion=1;ProductVersion='2.0.0';State='Installing';Started=[System.DateTimeOffset]::Now.ToString('o')}
+    [System.IO.File]::WriteAllText($installMarker,($state | ConvertTo-Json -Depth 3),(New-Object System.Text.UTF8Encoding($true)))
+}
 function Invoke-RealApply {
     param([object[]]$Plan,[string]$BackupRootOverride)
     Assert-TargetProcessesStopped
@@ -428,6 +465,7 @@ foreach ($candidate in $candidates) {
     [void]$detected.Add([pscustomobject]@{Platform=$candidate.Platform;Executable=$candidate.Executable;State=$state;Mode=$mode;InputDevices=$inputDevices;ProfileDirectory=$profileDirectory;DetectionSource=$candidate.Source})
 }
 
+foreach ($steamProduct in @(Get-SteamUrlProducts)) { [void]$detected.Add([pscustomobject]@{Platform=$steamProduct.Platform;Executable=$steamProduct.Executable;State=$steamProduct.State;Mode=$steamProduct.Mode;InputDevices='';ProfileDirectory='';DetectionSource=$steamProduct.DetectionSource}) }
 $bve = @($detected | Where-Object { [string]::Equals([string]$_.Platform,'BVE',[System.StringComparison]::Ordinal) -and [string]::Equals([string]$_.State,'Detected',[System.StringComparison]::Ordinal) })
 $pcsx2 = @($detected | Where-Object { [string]::Equals([string]$_.Platform,'PCSX2',[System.StringComparison]::Ordinal) -and [string]::Equals([string]$_.State,'Detected',[System.StringComparison]::Ordinal) })
 $rpcs3 = @($detected | Where-Object { [string]::Equals([string]$_.Platform,'RPCS3',[System.StringComparison]::Ordinal) -and [string]::Equals([string]$_.State,'Detected',[System.StringComparison]::Ordinal) })
@@ -462,6 +500,8 @@ $shortcutPath = ''
 $shortcutError = ''
 $succeeded=$true;$errorCode='';$errorMessage='';$failedSet='';$rollbackAttempted=$false;$rollbackSucceeded=$true;$rollbackError=''
 if ($Apply -and $RealSystem) {
+    Remove-InstallerTemporaryFiles ([object[]]@($plan))
+    Write-InstallMarker
     $realApplyResult = Invoke-RealApply ([object[]]@($plan)) $BackupRootOverride
     $applyResults = [object[]]@($realApplyResult.Results)
     $backupRoot = [string]$realApplyResult.BackupRoot
@@ -475,10 +515,11 @@ if ($Apply -and $RealSystem) {
             } else { $shortcutError='Core application plan was not unique.' }
         } else { $shortcutError='Shortcut was not created because Real Apply did not succeed.' }
     }
+    if ($succeeded -and [System.IO.File]::Exists($installMarker)) { [System.IO.File]::Delete($installMarker) }
 } elseif ($Apply) {
     $applyResults = Invoke-SandboxApply ([object[]]@($plan)) $TestRoot
 }
-$result=[pscustomobject]@{SchemaVersion=7;Generated=[System.DateTimeOffset]::Now.ToString('o');Succeeded=$succeeded;ErrorCode=$errorCode;ErrorMessage=$errorMessage;FailedSet=$failedSet;RollbackAttempted=$rollbackAttempted;RollbackSucceeded=$rollbackSucceeded;RollbackError=$rollbackError;ShortcutRequested=$shortcutRequested;ShortcutCreated=$shortcutCreated;ShortcutPath=$shortcutPath;ShortcutError=$shortcutError;DryRun=[bool]$DryRun;Apply=[bool]$Apply;RealSystem=[bool]$RealSystem;AdditionalSearch=[bool]$AdditionalSearch;TestRoot=$TestRoot;OutputRoot=$outputRoot;BackupRoot=$backupRoot;ReplacementDecisions=[pscustomobject]@{PCSX2=[bool]$ReplaceModifiedPCSX2Profile;RPCS3=[bool]$ReplaceModifiedRPCS3Profile};Detected=[object[]]@($detected);Plan=[object[]]@($plan);ApplyResults=[object[]]@($applyResults)}
+$result=[pscustomobject]@{SchemaVersion=8;Generated=[System.DateTimeOffset]::Now.ToString('o');InterruptedInstallDetected=$interruptedInstallDetected;Succeeded=$succeeded;ErrorCode=$errorCode;ErrorMessage=$errorMessage;FailedSet=$failedSet;RollbackAttempted=$rollbackAttempted;RollbackSucceeded=$rollbackSucceeded;RollbackError=$rollbackError;ShortcutRequested=$shortcutRequested;ShortcutCreated=$shortcutCreated;ShortcutPath=$shortcutPath;ShortcutError=$shortcutError;DryRun=[bool]$DryRun;Apply=[bool]$Apply;RealSystem=[bool]$RealSystem;AdditionalSearch=[bool]$AdditionalSearch;TestRoot=$TestRoot;OutputRoot=$outputRoot;BackupRoot=$backupRoot;ReplacementDecisions=[pscustomobject]@{PCSX2=[bool]$ReplaceModifiedPCSX2Profile;RPCS3=[bool]$ReplaceModifiedRPCS3Profile};Detected=[object[]]@($detected);Plan=[object[]]@($plan);ApplyResults=[object[]]@($applyResults)}
 [System.IO.File]::WriteAllText($jsonOutput,($result | ConvertTo-Json -Depth 9),(New-Object System.Text.UTF8Encoding($true)))
 $lines=New-Object System.Collections.ArrayList
 [void]$lines.Add('DenGo installer formal preview plan')

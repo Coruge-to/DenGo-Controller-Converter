@@ -9,13 +9,14 @@ Add-Type -AssemblyName System.Drawing
 
 $root = [System.IO.Path]::GetFullPath((Join-Path ([System.IO.Path]::GetDirectoryName($MyInvocation.MyCommand.Path)) '..'))
 $engine = Join-Path $root 'scripts\Invoke-DenGoInstaller.ps1'
-$repoRoot = [System.IO.Path]::GetFullPath((Join-Path $root '..'))
-$welcomeImagePath = Join-Path $repoRoot 'DenGo-Controller-Converter2.png'
+$welcomeImagePath = Join-Path $root 'assets\images\DenGo-Controller-Converter2.png'
 $script:runRoot = Join-Path $env:TEMP ('DenGoInstallerGui-' + [System.Guid]::NewGuid().ToString('N'))
 $script:outputRoot = Join-Path $script:runRoot 'dryrun'
 $script:sandboxRoot = Join-Path $script:runRoot 'sandbox'
 $planPath = Join-Path $script:outputRoot 'install-plan.json'
 $script:operation = 'idle'
+$script:allowClose = $false
+$script:lastResultAvailable = $false
 $script:process = $null
 $script:plan = $null
 $script:conflicts = @()
@@ -173,7 +174,7 @@ function Set-Page([string]$Name) {
     $welcome.Visible=$Name -eq 'welcome';$progress.Visible=$Name -eq 'progress';$conflict.Visible=$Name -eq 'conflict';$result.Visible=$Name -eq 'result';$complete.Visible=$Name -eq 'complete'
     $targetHeight=348;if($form.ClientSize.Height-ne$targetHeight){$form.ClientSize=New-Object System.Drawing.Size(560,$targetHeight)}
     # No footer panel visibility switching is required
-    $next.Visible=$Name -eq 'welcome';$cancel.Visible=$Name -eq 'welcome';$search.Visible=$Name -eq 'result';$finish.Visible=($Name -eq 'result' -or $Name -eq 'complete');$finish.Text=if($Name -eq 'result'){'次へ'}else{'完了'};$useExisting.Visible=$Name -eq 'conflict';$replaceSetting.Visible=$Name -eq 'conflict';$applyChoice.Visible=$false
+    $next.Visible=$Name -eq 'welcome';$cancel.Visible=($Name -eq 'welcome' -or ($Name -eq 'progress' -and $script:operation -eq 'additional-search'));$cancel.Text=if($Name -eq 'progress' -and $script:operation -eq 'additional-search'){'検索を中止'}else{'キャンセル'};$cancel.Left=if($Name -eq 'progress' -and $script:operation -eq 'additional-search'){417}else{450};$search.Visible=$Name -eq 'result';$finish.Visible=($Name -eq 'result' -or $Name -eq 'complete');$finish.Text=if($Name -eq 'result'){'次へ'}else{'完了'};$useExisting.Visible=$Name -eq 'conflict';$replaceSetting.Visible=$Name -eq 'conflict';$applyChoice.Visible=$false
     $form.AcceptButton=if($Name -eq 'welcome'){$next}elseif($Name -eq 'result' -or $Name -eq 'complete'){$finish}elseif($Name -eq 'conflict'){$useExisting}else{$null}
     foreach($button in @($next,$cancel,$search,$finish,$useExisting,$replaceSetting)){if($button.Visible){$button.BringToFront()}}
 }
@@ -185,7 +186,7 @@ function Add-Row([int]$Row,[string]$Kind,[string]$Software,[string]$State){$tabl
 function Get-ApplyResult([string]$Platform,[string]$Component){return @($script:plan.ApplyResults | Where-Object { $_.Platform -eq $Platform -and ([string]::IsNullOrWhiteSpace($Component) -or $_.Component -eq $Component) })}
 function Show-Results {
     for($i=$table.Controls.Count-1;$i-ge 3;$i--){$table.Controls.RemoveAt($i)}
-    $core=Get-ApplyResult 'Core' 'Application';if(@($core).Count-eq1){Add-Row 1 'ok' 'JRETS' '利用可能';Add-Row 2 'ok' 'RUNNING TRAIN' '利用可能'}else{Add-Row 1 'fail' 'JRETS' '本体の導入に失敗しました';Add-Row 2 'fail' 'RUNNING TRAIN' '本体の導入に失敗しました'}
+    $core=Get-ApplyResult 'Core' 'Application';if(@($core).Count-eq1){if(Has-Detected 'Steam' 'JRETS'){Add-Row 1 'ok' 'JRETS' '利用可能'}else{Add-Row 1 'none' 'JRETS' '見つかりませんでした'};if(Has-Detected 'Steam' 'RUNNINGTRAIN'){Add-Row 2 'ok' 'RUNNING TRAIN' '利用可能'}else{Add-Row 2 'none' 'RUNNING TRAIN' '見つかりませんでした'}}else{Add-Row 1 'fail' 'JRETS' '本体の導入に失敗しました';Add-Row 2 'fail' 'RUNNING TRAIN' '本体の導入に失敗しました'}
     foreach($entry in @(@('BVE5',3,'BVE Trainsim 5'),@('BVE6',4,'BVE Trainsim 6'))){$p=$entry[0];$r=[int]$entry[1];$n=$entry[2];$a=Get-ApplyResult $p 'Caller';if(@($a).Count-eq1){Add-Row $r 'ok' $n '連携済み・利用可能'}elseif(Has-Detected 'BVE' $p){Add-Row $r 'fail' $n '連携機能の導入に失敗しました'}else{Add-Row $r 'none' $n '見つかりませんでした'}}
     foreach($entry in @(@('PCSX2',5),@('RPCS3',6))){$n=$entry[0];$r=[int]$entry[1];$a=Get-ApplyResult $n 'InputProfile';if(-not(Has-Detected $n '')){Add-Row $r 'none' $n '見つかりませんでした'}elseif(@($a|Where-Object{$_.Action-eq'PreserveUserModified'}).Count-eq1){Add-Row $r 'warn' $n '既存の設定を使用します'}elseif(@($a).Count-eq1){Add-Row $r 'ok' $n '設定済み・利用可能'}else{Add-Row $r 'fail' $n '入力設定の追加に失敗しました'}}
     Set-Page 'result'
@@ -215,11 +216,75 @@ function Start-ConflictPreview([string[]]$Names) {
 }
 
 $timer=New-Object System.Windows.Forms.Timer;$timer.Interval=35
-function Start-Detection([bool]$Additional){Set-Page 'progress';$progressText.Text=if($Additional){'追加の環境を検索しています'}else{'対応ソフトを検出しています'};$progressHint.Text=if($Additional){'検索には時間がかかる場合があります'}else{'しばらくお待ちください'};$script:barX=1;$script:barStep=7;$block.Left=1;if([System.IO.Directory]::Exists($script:runRoot)){Remove-Item -LiteralPath $script:runRoot -Recurse -Force};[System.IO.Directory]::CreateDirectory($script:outputRoot)|Out-Null;$script:planPath=Join-Path $script:outputRoot 'install-plan.json';$script:operation='dryrun';$args=@('-NoProfile','-ExecutionPolicy','Bypass','-File',$engine,'-DryRun','-OutputRoot',$script:outputRoot);if($Additional){$args+='-AdditionalSearch'};$script:process=Start-Process powershell.exe -ArgumentList $args -PassThru -WindowStyle Hidden;$timer.Start()}
-function Start-SandboxApply {Set-Page 'progress';$progressText.Text='設定を適用しています';$progressHint.Text='安全なテスト領域へ適用しています';$applyOutput=Join-Path $script:runRoot 'apply';[System.IO.Directory]::CreateDirectory($applyOutput)|Out-Null;$script:planPath=Join-Path $applyOutput 'install-plan.json';$script:operation='apply';$args=@('-NoProfile','-ExecutionPolicy','Bypass','-File',$engine,'-Apply','-TestRoot',$script:sandboxRoot,'-OutputRoot',$applyOutput);if($script:decisions.ContainsKey('PCSX2')-and$script:decisions['PCSX2']-eq'replace'){$args+='-ReplaceModifiedPCSX2Profile'};if($script:decisions.ContainsKey('RPCS3')-and$script:decisions['RPCS3']-eq'replace'){$args+='-ReplaceModifiedRPCS3Profile'};$script:process=Start-Process powershell.exe -ArgumentList $args -PassThru -WindowStyle Hidden;$timer.Start()}
-$timer.Add_Tick({$limit=$track.ClientSize.Width-$block.Width-2;$script:barX+=$script:barStep;if($script:barX-ge$limit){$script:barX=$limit;$script:barStep=-7};if($script:barX-le1){$script:barX=1;$script:barStep=7};$block.Left=$script:barX;if($null-eq$script:process-or-not$script:process.HasExited){return};$timer.Stop();$code=$script:process.ExitCode;$script:process.Dispose();$script:process=$null;if($code-ne0-or-not[System.IO.File]::Exists($script:planPath)){[System.Windows.Forms.MessageBox]::Show('処理に失敗しました','DenGo セットアップ')|Out-Null;Set-Page 'welcome';return};$script:plan=[System.IO.File]::ReadAllText($script:planPath,[System.Text.Encoding]::UTF8)|ConvertFrom-Json;if($script:operation-eq'apply'){$script:operation='idle';Show-Results;return};$script:conflicts=@();foreach($n in @('PCSX2','RPCS3')){if(Has-Conflict $n){$script:conflicts+=$n}};$script:conflictIndex=0;$script:decisions=@{};if(@($script:conflicts).Count-eq0){Start-SandboxApply}else{Show-Conflict}})
-$next.Add_Click({Start-Detection $false});$search.Add_Click({Start-Detection $true});$cancel.Add_Click({$form.Close()});$finish.Add_Click({if($result.Visible){Set-Page 'complete'}elseif($complete.Visible){$form.Close()}});$useExisting.Add_Click({Resolve-Conflict 'keep'});$replaceSetting.Add_Click({Resolve-Conflict 'replace'})
-$form.Add_FormClosing({if($null-ne$script:process-and-not$script:process.HasExited){$_.Cancel=$true}})
+function Start-Detection([bool]$Additional){$script:operation=if($Additional){'additional-search'}else{'dryrun'};Set-Page 'progress';$progressText.Text=if($Additional){'追加の環境を検索しています'}else{'対応ソフトを検出しています'};$progressHint.Text=if($Additional){'検索には時間がかかる場合があります'}else{'しばらくお待ちください'};$script:barX=1;$script:barStep=7;$block.Left=1;if([System.IO.Directory]::Exists($script:runRoot)){Remove-Item -LiteralPath $script:runRoot -Recurse -Force};[System.IO.Directory]::CreateDirectory($script:outputRoot)|Out-Null;$script:planPath=Join-Path $script:outputRoot 'install-plan.json';$args=@('-NoProfile','-ExecutionPolicy','Bypass','-File',$engine,'-DryRun','-OutputRoot',$script:outputRoot);if($Additional){$args+='-AdditionalSearch'};$script:process=Start-Process powershell.exe -ArgumentList $args -PassThru -WindowStyle Hidden;$timer.Start()}
+function Start-SandboxApply {
+    Set-Page 'progress'
+    $progressText.Text='インストールしています'
+    $progressHint.Text='ファイルと設定を適用しています'
+    $applyOutput=Join-Path $script:runRoot 'apply'
+    [System.IO.Directory]::CreateDirectory($applyOutput)|Out-Null
+    $script:planPath=Join-Path $applyOutput 'install-plan.json'
+    $script:operation='real-apply'
+    $args=@('-NoProfile','-ExecutionPolicy','Bypass','-File',$engine,'-Apply','-RealSystem','-ConfirmRealApply','INSTALL','-OutputRoot',$applyOutput)
+    if([bool]$shortcut.Tag.Checked){$args+='-CreateDesktopShortcut'}
+    if($script:decisions.ContainsKey('PCSX2')-and$script:decisions['PCSX2']-eq'replace'){$args+='-ReplaceModifiedPCSX2Profile'}
+    if($script:decisions.ContainsKey('RPCS3')-and$script:decisions['RPCS3']-eq'replace'){$args+='-ReplaceModifiedRPCS3Profile'}
+    $script:process=Start-Process powershell.exe -ArgumentList $args -PassThru -WindowStyle Hidden
+    $timer.Start()
+}
+function Stop-CurrentProcess {
+    if($null-ne$script:process-and-not$script:process.HasExited){
+        try{$script:process.Kill();$script:process.WaitForExit()}catch{}
+    }
+    if($null-ne$script:process){try{$script:process.Dispose()}catch{};$script:process=$null}
+    $timer.Stop()
+}
+function Confirm-SetupCancel {
+    $answer=[System.Windows.Forms.MessageBox]::Show('セットアップを中止しますか？','DenGo Controller Converter セットアップ',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Question)
+    return $answer -eq [System.Windows.Forms.DialogResult]::Yes
+}
+$timer.Add_Tick({$limit=$track.ClientSize.Width-$block.Width-2;$script:barX+=$script:barStep;if($script:barX-ge$limit){$script:barX=$limit;$script:barStep=-7};if($script:barX-le1){$script:barX=1;$script:barStep=7};$block.Left=$script:barX;if($null-eq$script:process-or-not$script:process.HasExited){return};$timer.Stop();$code=$script:process.ExitCode;$script:process.Dispose();$script:process=$null;if(-not[System.IO.File]::Exists($script:planPath)){[System.Windows.Forms.MessageBox]::Show(('処理結果を確認できませんでした。 終了コード: '+$code),'DenGo セットアップ')|Out-Null;Set-Page 'welcome';return};$script:plan=[System.IO.File]::ReadAllText($script:planPath,[System.Text.Encoding]::UTF8)|ConvertFrom-Json;if(-not[bool]$script:plan.Succeeded){$detail=[string]$script:plan.ErrorMessage;if([string]::IsNullOrWhiteSpace($detail)){$detail='処理に失敗しました'};[System.Windows.Forms.MessageBox]::Show($detail,'DenGo セットアップ')|Out-Null;Set-Page 'welcome';return};if($script:operation-eq'real-apply'){$script:operation='idle';$script:lastResultAvailable=$true;Show-Results;return};$script:conflicts=@();foreach($n in @('PCSX2','RPCS3')){if(Has-Conflict $n){$script:conflicts+=$n}};$script:conflictIndex=0;$script:decisions=@{};if(@($script:conflicts).Count-eq0){Start-SandboxApply}else{Show-Conflict}})
+$next.Add_Click({Start-Detection $false})
+$search.Add_Click({Start-Detection $true})
+$cancel.Add_Click({
+    if($script:operation -eq 'additional-search'){
+        Stop-CurrentProcess
+        $script:operation='idle'
+        if($script:lastResultAvailable){Set-Page 'result'}else{Set-Page 'welcome'}
+    } elseif(Confirm-SetupCancel){
+        Stop-CurrentProcess
+        $script:allowClose=$true
+        $form.Close()
+    }
+})
+$finish.Add_Click({
+    if($result.Visible){Set-Page 'complete'}
+    elseif($complete.Visible){
+        if([bool]$launch.Tag.Checked){
+            $application=Join-Path $env:LOCALAPPDATA 'Programs\DenGo Controller Converter\DenGoControllerConverter.exe'
+            try{
+                if(-not [System.IO.File]::Exists($application)){throw ('Installed application was not found: ' + $application)}
+                Start-Process -FilePath $application -WorkingDirectory ([System.IO.Path]::GetDirectoryName($application)) | Out-Null
+            } catch {
+                [System.Windows.Forms.MessageBox]::Show(('DenGo Controller Converterを起動できませんでした。' + [System.Environment]::NewLine + $_.Exception.Message),'DenGo セットアップ',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Error)|Out-Null
+                return
+            }
+        }
+        $script:allowClose=$true
+        $form.Close()
+    }
+})
+$useExisting.Add_Click({Resolve-Conflict 'keep'});$replaceSetting.Add_Click({Resolve-Conflict 'replace'})
+$form.Add_FormClosing({
+    if($script:allowClose){return}
+    if(Confirm-SetupCancel){
+        Stop-CurrentProcess
+        $script:allowClose=$true
+        $_.Cancel=$false
+    } else {
+        $_.Cancel=$true
+    }
+})
 $form.Add_FormClosed({try{if($null-ne$welcomeImage.Image){$welcomeImage.Image.Dispose();$welcomeImage.Image=$null}}catch{}})
 if($Preview -eq 'Symbols'){Show-SymbolPreview}
 elseif($Preview -eq 'PCSX2Conflict'){Start-ConflictPreview @('PCSX2')}
