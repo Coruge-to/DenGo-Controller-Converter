@@ -42,7 +42,10 @@ MB_OK = 0x00000000
 MB_ICONINFORMATION = 0x00000040
 MB_SETFOREGROUND = 0x00010000
 MB_YESNO = 0x00000004
+MB_RETRYCANCEL = 0x00000005
+MB_ICONWARNING = 0x00000030
 IDYES = 6
+IDRETRY = 4
 
 def _check_for_updates_worker(result_queue):
     result = check_latest_release()
@@ -225,6 +228,41 @@ def get_dynamic_height(game_mode, brake_mode, max_power, max_brake):
     req_h = max(p_height, b_height) + bottom_margin
     return max(req_h, 0)
 
+def find_compatible_controller():
+    pygame.joystick.quit()
+    pygame.joystick.init()
+    candidates = []
+    for index in range(pygame.joystick.get_count()):
+        candidate = pygame.joystick.Joystick(index)
+        candidate.init()
+        candidates.append(candidate)
+    preferred = [
+        candidate for candidate in candidates
+        if "ELECOM JC-PS201U" in candidate.get_name()
+        and candidate.get_numbuttons() >= 16
+    ]
+    if preferred:
+        return preferred[0]
+    compatible = [candidate for candidate in candidates if candidate.get_numbuttons() >= 16]
+    return compatible[0] if compatible else None
+
+
+def wait_for_compatible_controller():
+    while True:
+        joy = find_compatible_controller()
+        if joy is not None:
+            return joy
+        answer = ctypes.windll.user32.MessageBoxW(
+            None,
+            "対応する電GOコントローラーが見つかりませんでした。\n\n"
+            "コントローラーを接続してから「再試行」を押してください。",
+            "DenGo Controller Converter",
+            MB_RETRYCANCEL | MB_ICONWARNING | MB_SETFOREGROUND,
+        )
+        if answer != IDRETRY:
+            return None
+
+
 def main():
     pygame.init()
     pygame.display.set_caption("DenGo Controller Converter")
@@ -252,35 +290,10 @@ def main():
     ui.init_fonts()
 
     pygame.joystick.init()
-    joy = None
-    joystick_count = pygame.joystick.get_count()
-    candidates = []
-    for index in range(joystick_count):
-        candidate = pygame.joystick.Joystick(index)
-        candidate.init()
-        candidates.append(candidate)
-
-    preferred = [
-        candidate for candidate in candidates
-        if "ELECOM JC-PS201U" in candidate.get_name()
-        and candidate.get_numbuttons() >= 16
-    ]
-    if preferred:
-        joy = preferred[0]
-    else:
-        compatible = [candidate for candidate in candidates if candidate.get_numbuttons() >= 16]
-        if compatible:
-            joy = compatible[0]
-
+    joy = wait_for_compatible_controller()
     if joy is None:
-        detected = ", ".join(
-            f"{candidate.get_name()} ({candidate.get_numbuttons()} buttons)"
-            for candidate in candidates
-        )
-        raise RuntimeError(
-            "Compatible DenGo controller was not found. "
-            f"Detected controllers: {detected or 'none'}"
-        )
+        pygame.quit()
+        return
 
     print(
         f"DENGO_CONTROLLER={joy.get_name()} BUTTONS={joy.get_numbuttons()}",
@@ -337,9 +350,31 @@ def main():
     running = True
     while running:
         for event in pygame.event.get():
-            if event.type == pygame.QUIT: running = False
+            if event.type == pygame.QUIT:
+                running = False
+            elif event.type == pygame.JOYDEVICEREMOVED:
+                try:
+                    selected_removed = event.instance_id == joy.get_instance_id()
+                except (AttributeError, pygame.error):
+                    selected_removed = True
+                if selected_removed:
+                    window_backend.detach()
+                    logics[game_mode].reset()
+                    virtual_gamepad_backend.disconnect()
+                    input_was_enabled = False
+                    active_window_route = None
+                    joy = wait_for_compatible_controller()
+                    if joy is None:
+                        running = False
+                    else:
+                        mascon_filter = StableNotchReader(0)
+                        brake_filter = StableNotchReader(0)
+                        physical_brake_filter = StableNotchReader(0)
+                        last_visual_state = None
             for btn in all_btns:
                 btn.handle_event(event)
+        if not running:
+            break
 
         if not update_notice_shown:
             try:
