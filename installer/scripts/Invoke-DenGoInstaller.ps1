@@ -7,7 +7,8 @@
     [switch]$AdditionalSearch,
     [switch]$ReplaceModifiedPCSX2Profile,
     [switch]$ReplaceModifiedRPCS3Profile,
-    [string]$OutputRoot = ''
+    [string]$OutputRoot = '',
+    [string]$BackupRootOverride = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -247,37 +248,61 @@ function Restore-AppliedItems {
 function Invoke-RealApplySet {
     param([string]$SetName,[object[]]$Items,[string]$BackupRoot,[System.Collections.ArrayList]$Results)
     $changed = New-Object System.Collections.ArrayList
+    $resultStart = @($Results).Count
     try {
         foreach ($item in @($Items)) {
             $action = [string]$item.Action
             if ([string]::Equals($action,'Unchanged',[System.StringComparison]::Ordinal) -or [string]::Equals($action,'PreserveUserModified',[System.StringComparison]::Ordinal) -or [string]::Equals($action,'NotInitialized',[System.StringComparison]::Ordinal)) {
-                [void]$Results.Add([pscustomobject]@{Set=$SetName;Platform=$item.Platform;Component=$item.Component;Action=$action;Destination=$item.Destination;Applied=$false;Backup=''})
+                [void]$Results.Add([pscustomobject]@{Set=$SetName;Platform=$item.Platform;Component=$item.Component;Action=$action;Destination=$item.Destination;Applied=$false;Backup='';Succeeded=$true;ErrorCode=''})
                 continue
             }
             if (-not [string]::Equals($action,'Add',[System.StringComparison]::Ordinal) -and -not [string]::Equals($action,'UpdateOrRepair',[System.StringComparison]::Ordinal)) { throw ("Unsupported Apply action: {0}" -f $action) }
             $existedBefore = [System.IO.File]::Exists([string]$item.Destination)
             $backup = Copy-VerifiedFile ([string]$item.Source) ([string]$item.Destination) $BackupRoot
             [void]$changed.Add([pscustomobject]@{Sequence=@($changed).Count;Destination=[string]$item.Destination;ExistedBefore=$existedBefore;Backup=$backup})
-            [void]$Results.Add([pscustomobject]@{Set=$SetName;Platform=$item.Platform;Component=$item.Component;Action=$action;Destination=$item.Destination;Applied=$true;Backup=$backup})
+            [void]$Results.Add([pscustomobject]@{Set=$SetName;Platform=$item.Platform;Component=$item.Component;Action=$action;Destination=$item.Destination;Applied=$true;Backup=$backup;Succeeded=$true;ErrorCode=''})
         }
     } catch {
-        Restore-AppliedItems ([object[]]@($changed))
-        throw
+        $originalMessage = [string]$_.Exception.Message
+        $rollbackAttempted = @($changed).Count -ne 0
+        $rollbackSucceeded = $true
+        $rollbackMessage = ''
+        try { Restore-AppliedItems ([object[]]@($changed)) } catch { $rollbackSucceeded=$false;$rollbackMessage=[string]$_.Exception.Message }
+        while (@($Results).Count -gt $resultStart) { $Results.RemoveAt(@($Results).Count - 1) }
+        [void]$Results.Add([pscustomobject]@{Set=$SetName;Platform=$SetName;Component='Set';Action='Failed';Destination='';Applied=$false;Backup='';Succeeded=$false;ErrorCode='SetApplyFailed';ErrorMessage=$originalMessage;RollbackAttempted=$rollbackAttempted;RollbackSucceeded=$rollbackSucceeded;RollbackError=$rollbackMessage})
+        $failure = New-Object System.Exception(('Set Apply failed: ' + $SetName),$_.Exception)
+        $failure.Data['FailedSet']=$SetName
+        $failure.Data['RollbackAttempted']=$rollbackAttempted
+        $failure.Data['RollbackSucceeded']=$rollbackSucceeded
+        $failure.Data['RollbackError']=$rollbackMessage
+        throw $failure
     }
 }
 
 function Invoke-RealApply {
-    param([object[]]$Plan,[string]$OutputRoot)
+    param([object[]]$Plan,[string]$BackupRootOverride)
     Assert-TargetProcessesStopped
-    $backupRoot = Join-Path $OutputRoot ('backups-' + [System.DateTime]::Now.ToString('yyyyMMdd-HHmmss'))
+    if ([string]::IsNullOrWhiteSpace($BackupRootOverride)) {
+        $backupBase = Join-Path $env:LOCALAPPDATA 'DenGo Controller Converter\InstallerBackups'
+        $backupRoot = Join-Path $backupBase ([System.DateTime]::Now.ToString('yyyyMMdd-HHmmss'))
+    } else {
+        $backupRoot = [System.IO.Path]::GetFullPath($BackupRootOverride)
+        $tempPrefix = [System.IO.Path]::GetFullPath($env:TEMP).TrimEnd([char[]]@([char]92,[char]47)) + [System.IO.Path]::DirectorySeparatorChar
+        $localPrefix = [System.IO.Path]::GetFullPath($env:LOCALAPPDATA).TrimEnd([char[]]@([char]92,[char]47)) + [System.IO.Path]::DirectorySeparatorChar
+        if (-not $backupRoot.StartsWith($tempPrefix,[System.StringComparison]::OrdinalIgnoreCase) -and -not $backupRoot.StartsWith($localPrefix,[System.StringComparison]::OrdinalIgnoreCase)) { throw 'BackupRootOverride must be under TEMP or LOCALAPPDATA.' }
+    }
     [System.IO.Directory]::CreateDirectory($backupRoot) | Out-Null
     $results = New-Object System.Collections.ArrayList
+    $succeeded=$true;$errorCode='';$errorMessage='';$failedSet='';$rollbackAttempted=$false;$rollbackSucceeded=$true;$rollbackError=''
     $setNames = @('Core','BVE5','BVE6','BveEX Current','AtsEX Legacy','PCSX2','RPCS3')
     foreach ($setName in $setNames) {
         $items = @($Plan | Where-Object { [string]::Equals([string]$_.Platform,$setName,[System.StringComparison]::Ordinal) })
-        if (@($items).Count -ne 0) { Invoke-RealApplySet $setName ([object[]]@($items)) $backupRoot $results }
+        if (@($items).Count -eq 0) { continue }
+        try { Invoke-RealApplySet $setName ([object[]]@($items)) $backupRoot $results } catch {
+            $succeeded=$false;$errorCode='SetApplyFailed';$errorMessage=[string]$_.Exception.InnerException.Message;$failedSet=[string]$_.Exception.Data['FailedSet'];$rollbackAttempted=[bool]$_.Exception.Data['RollbackAttempted'];$rollbackSucceeded=[bool]$_.Exception.Data['RollbackSucceeded'];$rollbackError=[string]$_.Exception.Data['RollbackError'];break
+        }
     }
-    return [pscustomobject]@{BackupRoot=$backupRoot;Results=[object[]]@($results)}
+    return [pscustomobject]@{Succeeded=$succeeded;ErrorCode=$errorCode;ErrorMessage=$errorMessage;FailedSet=$failedSet;RollbackAttempted=$rollbackAttempted;RollbackSucceeded=$rollbackSucceeded;RollbackError=$rollbackError;BackupRoot=$backupRoot;Results=[object[]]@($results)}
 }
 
 function New-PlanItem {
@@ -398,14 +423,16 @@ foreach ($item in @($plan)) {
 }
 $applyResults = [object[]]@()
 $backupRoot = ''
+$succeeded=$true;$errorCode='';$errorMessage='';$failedSet='';$rollbackAttempted=$false;$rollbackSucceeded=$true;$rollbackError=''
 if ($Apply -and $RealSystem) {
-    $realApplyResult = Invoke-RealApply ([object[]]@($plan)) $outputRoot
+    $realApplyResult = Invoke-RealApply ([object[]]@($plan)) $BackupRootOverride
     $applyResults = [object[]]@($realApplyResult.Results)
     $backupRoot = [string]$realApplyResult.BackupRoot
+    $succeeded=[bool]$realApplyResult.Succeeded;$errorCode=[string]$realApplyResult.ErrorCode;$errorMessage=[string]$realApplyResult.ErrorMessage;$failedSet=[string]$realApplyResult.FailedSet;$rollbackAttempted=[bool]$realApplyResult.RollbackAttempted;$rollbackSucceeded=[bool]$realApplyResult.RollbackSucceeded;$rollbackError=[string]$realApplyResult.RollbackError
 } elseif ($Apply) {
     $applyResults = Invoke-SandboxApply ([object[]]@($plan)) $TestRoot
 }
-$result=[pscustomobject]@{SchemaVersion=5;Generated=[System.DateTimeOffset]::Now.ToString('o');DryRun=[bool]$DryRun;Apply=[bool]$Apply;RealSystem=[bool]$RealSystem;AdditionalSearch=[bool]$AdditionalSearch;TestRoot=$TestRoot;OutputRoot=$outputRoot;BackupRoot=$backupRoot;ReplacementDecisions=[pscustomobject]@{PCSX2=[bool]$ReplaceModifiedPCSX2Profile;RPCS3=[bool]$ReplaceModifiedRPCS3Profile};Detected=[object[]]@($detected);Plan=[object[]]@($plan);ApplyResults=[object[]]@($applyResults)}
+$result=[pscustomobject]@{SchemaVersion=6;Generated=[System.DateTimeOffset]::Now.ToString('o');Succeeded=$succeeded;ErrorCode=$errorCode;ErrorMessage=$errorMessage;FailedSet=$failedSet;RollbackAttempted=$rollbackAttempted;RollbackSucceeded=$rollbackSucceeded;RollbackError=$rollbackError;DryRun=[bool]$DryRun;Apply=[bool]$Apply;RealSystem=[bool]$RealSystem;AdditionalSearch=[bool]$AdditionalSearch;TestRoot=$TestRoot;OutputRoot=$outputRoot;BackupRoot=$backupRoot;ReplacementDecisions=[pscustomobject]@{PCSX2=[bool]$ReplaceModifiedPCSX2Profile;RPCS3=[bool]$ReplaceModifiedRPCS3Profile};Detected=[object[]]@($detected);Plan=[object[]]@($plan);ApplyResults=[object[]]@($applyResults)}
 [System.IO.File]::WriteAllText($jsonOutput,($result | ConvertTo-Json -Depth 9),(New-Object System.Text.UTF8Encoding($true)))
 $lines=New-Object System.Collections.ArrayList
 [void]$lines.Add('DenGo installer formal preview plan')
