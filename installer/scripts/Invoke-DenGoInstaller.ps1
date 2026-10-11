@@ -8,7 +8,9 @@
     [switch]$ReplaceModifiedPCSX2Profile,
     [switch]$ReplaceModifiedRPCS3Profile,
     [string]$OutputRoot = '',
-    [string]$BackupRootOverride = ''
+    [string]$BackupRootOverride = '',
+    [switch]$CreateDesktopShortcut,
+    [string]$ShortcutPathOverride = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -224,6 +226,37 @@ function Invoke-SandboxApply {
     }
     return [object[]]@($results)
 }
+function Invoke-DesktopShortcut {
+    param([string]$ApplicationPath,[string]$ShortcutPathOverride)
+    $shortcutPath = ''
+    try {
+        if (-not [System.IO.File]::Exists($ApplicationPath)) { throw 'Installed application was not found.' }
+        if ([string]::IsNullOrWhiteSpace($ShortcutPathOverride)) {
+            $desktop = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::Desktop)
+            $shortcutPath = Join-Path $desktop 'DenGo Controller Converter.lnk'
+        } else {
+            $shortcutPath = [System.IO.Path]::GetFullPath($ShortcutPathOverride)
+            $tempPrefix = [System.IO.Path]::GetFullPath($env:TEMP).TrimEnd([char[]]@([char]92,[char]47)) + [System.IO.Path]::DirectorySeparatorChar
+            $desktopPrefix = [System.IO.Path]::GetFullPath([System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::Desktop)).TrimEnd([char[]]@([char]92,[char]47)) + [System.IO.Path]::DirectorySeparatorChar
+            if (-not $shortcutPath.StartsWith($tempPrefix,[System.StringComparison]::OrdinalIgnoreCase) -and -not $shortcutPath.StartsWith($desktopPrefix,[System.StringComparison]::OrdinalIgnoreCase)) { throw 'ShortcutPathOverride must be under TEMP or the current user Desktop.' }
+        }
+        $parent = [System.IO.Path]::GetDirectoryName($shortcutPath)
+        [System.IO.Directory]::CreateDirectory($parent) | Out-Null
+        $shell = New-Object -ComObject WScript.Shell
+        $shortcut = $shell.CreateShortcut($shortcutPath)
+        $shortcut.TargetPath = $ApplicationPath
+        $shortcut.WorkingDirectory = [System.IO.Path]::GetDirectoryName($ApplicationPath)
+        $shortcut.Save()
+        if (-not [System.IO.File]::Exists($shortcutPath)) { throw 'Shortcut file was not created.' }
+        $verify = $shell.CreateShortcut($shortcutPath)
+        if (-not [string]::Equals([System.IO.Path]::GetFullPath([string]$verify.TargetPath),[System.IO.Path]::GetFullPath($ApplicationPath),[System.StringComparison]::OrdinalIgnoreCase)) { throw 'Shortcut target verification failed.' }
+        if (-not [string]::Equals([System.IO.Path]::GetFullPath([string]$verify.WorkingDirectory),[System.IO.Path]::GetFullPath([System.IO.Path]::GetDirectoryName($ApplicationPath)),[System.StringComparison]::OrdinalIgnoreCase)) { throw 'Shortcut working directory verification failed.' }
+        return [pscustomobject]@{Requested=$true;Created=$true;Path=$shortcutPath;Error=''}
+    } catch {
+        return [pscustomobject]@{Requested=$true;Created=$false;Path=$shortcutPath;Error=[string]$_.Exception.Message}
+    }
+}
+
 function Assert-TargetProcessesStopped {
     $running = @(Get-CimInstance Win32_Process | Where-Object {
         [string]::Equals([string]$_.Name,'BveTs.exe',[System.StringComparison]::OrdinalIgnoreCase) -or
@@ -423,22 +456,35 @@ foreach ($item in @($plan)) {
 }
 $applyResults = [object[]]@()
 $backupRoot = ''
+$shortcutRequested = [bool]$CreateDesktopShortcut
+$shortcutCreated = $false
+$shortcutPath = ''
+$shortcutError = ''
 $succeeded=$true;$errorCode='';$errorMessage='';$failedSet='';$rollbackAttempted=$false;$rollbackSucceeded=$true;$rollbackError=''
 if ($Apply -and $RealSystem) {
     $realApplyResult = Invoke-RealApply ([object[]]@($plan)) $BackupRootOverride
     $applyResults = [object[]]@($realApplyResult.Results)
     $backupRoot = [string]$realApplyResult.BackupRoot
     $succeeded=[bool]$realApplyResult.Succeeded;$errorCode=[string]$realApplyResult.ErrorCode;$errorMessage=[string]$realApplyResult.ErrorMessage;$failedSet=[string]$realApplyResult.FailedSet;$rollbackAttempted=[bool]$realApplyResult.RollbackAttempted;$rollbackSucceeded=[bool]$realApplyResult.RollbackSucceeded;$rollbackError=[string]$realApplyResult.RollbackError
+    if ($CreateDesktopShortcut) {
+        if ($succeeded) {
+            $applicationPlan = @($plan | Where-Object { [string]::Equals([string]$_.Platform,'Core',[System.StringComparison]::Ordinal) -and [string]::Equals([string]$_.Component,'Application',[System.StringComparison]::Ordinal) })
+            if (@($applicationPlan).Count -eq 1) {
+                $shortcutResult = Invoke-DesktopShortcut ([string]$applicationPlan[0].Destination) $ShortcutPathOverride
+                $shortcutCreated=[bool]$shortcutResult.Created;$shortcutPath=[string]$shortcutResult.Path;$shortcutError=[string]$shortcutResult.Error
+            } else { $shortcutError='Core application plan was not unique.' }
+        } else { $shortcutError='Shortcut was not created because Real Apply did not succeed.' }
+    }
 } elseif ($Apply) {
     $applyResults = Invoke-SandboxApply ([object[]]@($plan)) $TestRoot
 }
-$result=[pscustomobject]@{SchemaVersion=6;Generated=[System.DateTimeOffset]::Now.ToString('o');Succeeded=$succeeded;ErrorCode=$errorCode;ErrorMessage=$errorMessage;FailedSet=$failedSet;RollbackAttempted=$rollbackAttempted;RollbackSucceeded=$rollbackSucceeded;RollbackError=$rollbackError;DryRun=[bool]$DryRun;Apply=[bool]$Apply;RealSystem=[bool]$RealSystem;AdditionalSearch=[bool]$AdditionalSearch;TestRoot=$TestRoot;OutputRoot=$outputRoot;BackupRoot=$backupRoot;ReplacementDecisions=[pscustomobject]@{PCSX2=[bool]$ReplaceModifiedPCSX2Profile;RPCS3=[bool]$ReplaceModifiedRPCS3Profile};Detected=[object[]]@($detected);Plan=[object[]]@($plan);ApplyResults=[object[]]@($applyResults)}
+$result=[pscustomobject]@{SchemaVersion=7;Generated=[System.DateTimeOffset]::Now.ToString('o');Succeeded=$succeeded;ErrorCode=$errorCode;ErrorMessage=$errorMessage;FailedSet=$failedSet;RollbackAttempted=$rollbackAttempted;RollbackSucceeded=$rollbackSucceeded;RollbackError=$rollbackError;ShortcutRequested=$shortcutRequested;ShortcutCreated=$shortcutCreated;ShortcutPath=$shortcutPath;ShortcutError=$shortcutError;DryRun=[bool]$DryRun;Apply=[bool]$Apply;RealSystem=[bool]$RealSystem;AdditionalSearch=[bool]$AdditionalSearch;TestRoot=$TestRoot;OutputRoot=$outputRoot;BackupRoot=$backupRoot;ReplacementDecisions=[pscustomobject]@{PCSX2=[bool]$ReplaceModifiedPCSX2Profile;RPCS3=[bool]$ReplaceModifiedRPCS3Profile};Detected=[object[]]@($detected);Plan=[object[]]@($plan);ApplyResults=[object[]]@($applyResults)}
 [System.IO.File]::WriteAllText($jsonOutput,($result | ConvertTo-Json -Depth 9),(New-Object System.Text.UTF8Encoding($true)))
 $lines=New-Object System.Collections.ArrayList
 [void]$lines.Add('DenGo installer formal preview plan')
 [void]$lines.Add(("Generated: {0}" -f $result.Generated))
 foreach ($item in $plan) { [void]$lines.Add(("{0,-18} | {1,-12} | {2,-20} | {3}" -f $item.Platform,$item.Component,$item.Action,$item.Destination)) }
-if ($RealSystem) { [void]$lines.Add('Real-system Apply completed. See ApplyResults and BackupRoot.') } elseif ($Apply) { [void]$lines.Add('Sandbox Apply completed. Real installed files were not changed.') } else { [void]$lines.Add('No installed file or profile was changed.') }
+if ($RealSystem) { [void]$lines.Add('Real-system Apply completed. See ApplyResults, BackupRoot, and shortcut fields.') } elseif ($Apply) { [void]$lines.Add('Sandbox Apply completed. Real installed files were not changed.') } else { [void]$lines.Add('No installed file or profile was changed.') }
 [System.IO.File]::WriteAllLines($textOutput,[string[]]@($lines),(New-Object System.Text.UTF8Encoding($true)))
 
 $scriptText=[System.IO.File]::ReadAllText($MyInvocation.MyCommand.Path,[System.Text.Encoding]::UTF8)
