@@ -24,11 +24,17 @@ namespace CorugeTo.DenGo.ControllerConverter
         private const string MappingName = @"Local\CorugeTo.DenGo.HandleCommand.v1";
         private const int MappingSize = 64;
         private const int Magic = 0x44474843;
-        private const int SchemaVersion = 1;
+        private const int SchemaVersion = 2;
         private const uint FileMapRead = 0x0004;
         private const uint Synchronize = 0x00100000;
         private const long MaxAgeTicks = 2L * 10000000L;
         private const int AxisSHandle = 3;
+        private const int FunctionKeyAxis = -1;
+        private const int Horn1Key = 0;
+        private const int Horn2Key = 1;
+        private const int StartButtonMask = 0x01;
+        private const int SelectButtonMask = 0x02;
+        private const int SupportedButtonMask = StartButtonMask | SelectButtonMask;
         private const int BridgeLostNoticeMs = 500;
         private const int MonitorIntervalMs = 50;
         private const uint MbOk = 0x00000000;
@@ -38,7 +44,6 @@ namespace CorugeTo.DenGo.ControllerConverter
         private const string ProductDisplayName = "DenGo Controller Converter";
         private const string AppMutexName = @"Local\CorugeTo.DenGo.ControllerConverter.App.v1";
         private const string InstallRegistryKey = @"Software\Coruge-to\DenGo Controller Converter";
-        private const string LauncherPathValue = "LauncherPath";
         private const string LauncherArgumentsValue = "LauncherArguments";
         private const string AppMissingNoticeText =
             "DenGo Controller Converter本体が見つかりません。\r\n" +
@@ -65,6 +70,7 @@ namespace CorugeTo.DenGo.ControllerConverter
         private bool hasLastValue;
         private int lastValue;
         private int lastGeneration = -1;
+        private int pressedButtonMask;
         private string lastStatus;
 
         public event InputEventHandler LeverMoved;
@@ -77,7 +83,7 @@ namespace CorugeTo.DenGo.ControllerConverter
                 owner,
                 "DenGo Controller Converter 0.2.0.0\n\n" +
                 "Vehicle-spec handshake and absolute Axis 3 handle input are enabled.\n" +
-                "Reverser and key events are not controlled.",
+                "Reverser is not controlled. START and SELECT drive BVE horn key events.",
                 "DenGo Controller Converter",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Information);
@@ -108,7 +114,7 @@ namespace CorugeTo.DenGo.ControllerConverter
             bridgeMonitorThread.Start();
             WriteLog("LOAD version=0.2.0.0 pid=" + pid);
             WriteLog("CONTRACT mapping=" + MappingName + " size=" + MappingSize);
-            WriteLog("SAFETY axis=3 keyEvents=disabled reverser=untouched");
+            WriteLog("SAFETY axis=3 keyEvents=bve-horns-only reverser=untouched");
             StartConverterIfNeeded();
         }
 
@@ -142,6 +148,7 @@ namespace CorugeTo.DenGo.ControllerConverter
             }
             if (!axis3Available)
             {
+                ReleasePressedButtons();
                 LogStatus("WAIT axis3_unavailable");
                 return;
             }
@@ -150,6 +157,7 @@ namespace CorugeTo.DenGo.ControllerConverter
             string readStatus;
             if (!TryReadMapping(out data, out readStatus))
             {
+                ReleasePressedButtons();
                 LogStatus("WAIT mapping_" + readStatus);
                 return;
             }
@@ -158,6 +166,7 @@ namespace CorugeTo.DenGo.ControllerConverter
             string parseStatus;
             if (!TryParseSnapshot(data, out snapshot, out parseStatus))
             {
+                ReleasePressedButtons();
                 LogStatus("WAIT snapshot_" + parseStatus);
                 return;
             }
@@ -165,11 +174,13 @@ namespace CorugeTo.DenGo.ControllerConverter
             long ageTicks = DateTime.UtcNow.Ticks - snapshot.UpdatedUtcTicks;
             if (ageTicks < 0 || ageTicks > MaxAgeTicks)
             {
+                ReleasePressedButtons();
                 LogStatus("WAIT stale");
                 return;
             }
             if (!snapshot.Enabled || !snapshot.Valid)
             {
+                ReleasePressedButtons();
                 LogStatus("WAIT disabled_or_invalid enabled=" + snapshot.Enabled +
                     " valid=" + snapshot.Valid);
                 return;
@@ -179,16 +190,20 @@ namespace CorugeTo.DenGo.ControllerConverter
             string commandStatus;
             if (!TryResolveAxis3Value(snapshot, out requestedValue, out commandStatus))
             {
+                ReleasePressedButtons();
                 LogStatus("WAIT command_" + commandStatus);
                 return;
             }
 
             if (snapshot.Generation != lastGeneration)
             {
+                ReleasePressedButtons();
                 WriteLog("GENERATION_CHANGE old=" + lastGeneration +
                     " new=" + snapshot.Generation);
                 lastGeneration = snapshot.Generation;
             }
+
+            ApplyButtonMask(snapshot.ButtonMask, snapshot.Sequence, snapshot.Generation);
 
             int outputValue = Math.Max(axis3Minimum, Math.Min(axis3Maximum, requestedValue));
             if (hasLastValue && outputValue == lastValue)
@@ -224,6 +239,7 @@ namespace CorugeTo.DenGo.ControllerConverter
             {
                 return;
             }
+            ReleasePressedButtons();
             disposed = true;
             try { if (monitorStop != null) monitorStop.Set(); } catch { }
             try { if (stop != null) stop.Set(); } catch { }
@@ -245,6 +261,59 @@ namespace CorugeTo.DenGo.ControllerConverter
         }
 
 
+        private void ApplyButtonMask(int requestedMask, int sequence, int generation)
+        {
+            if ((pressedButtonMask ^ requestedMask) == 0) return;
+            ApplyButtonTransition(StartButtonMask, Horn2Key, requestedMask, sequence, generation, "START");
+            ApplyButtonTransition(SelectButtonMask, Horn1Key, requestedMask, sequence, generation, "SELECT");
+        }
+
+        private void ApplyButtonTransition(int mask, int keyIndex, int requestedMask,
+            int sequence, int generation, string name)
+        {
+            bool wasPressed = (pressedButtonMask & mask) != 0;
+            bool isPressed = (requestedMask & mask) != 0;
+            if (wasPressed == isPressed) return;
+
+            InputEventHandler handler = isPressed ? KeyDown : KeyUp;
+            if (handler == null)
+            {
+                LogStatus("WAIT no_" + (isPressed ? "KeyDown" : "KeyUp") + "_subscriber");
+                if (!isPressed) pressedButtonMask &= ~mask;
+                return;
+            }
+
+            handler(this, new InputEventArgs(FunctionKeyAxis, keyIndex));
+            if (isPressed) pressedButtonMask |= mask;
+            else pressedButtonMask &= ~mask;
+            lastStatus = null;
+            WriteLog("KEY_" + (isPressed ? "DOWN" : "UP") +
+                " name=" + name + " axis=" + FunctionKeyAxis + " value=" + keyIndex +
+                " sequence=" + sequence + " generation=" + generation);
+        }
+
+        private void ReleasePressedButtons()
+        {
+            int buttonsToRelease = pressedButtonMask;
+            if (buttonsToRelease == 0) return;
+
+            InputEventHandler handler = KeyUp;
+            if (handler != null)
+            {
+                if ((buttonsToRelease & StartButtonMask) != 0)
+                {
+                    handler(this, new InputEventArgs(FunctionKeyAxis, Horn2Key));
+                    WriteLog("KEY_UP name=START reason=safety-release");
+                }
+                if ((buttonsToRelease & SelectButtonMask) != 0)
+                {
+                    handler(this, new InputEventArgs(FunctionKeyAxis, Horn1Key));
+                    WriteLog("KEY_UP name=SELECT reason=safety-release");
+                }
+            }
+            pressedButtonMask = 0;
+        }
+
         private void StartConverterIfNeeded()
         {
             if (Interlocked.CompareExchange(ref appStartAttempted, 1, 0) != 0)
@@ -258,7 +327,11 @@ namespace CorugeTo.DenGo.ControllerConverter
                 WriteLog("APP_AUTOSTART skipped reason=already-running");
                 return;
             }
-            string launcherPath = null;
+            string launcherPath = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "Programs",
+                ProductDisplayName,
+                "DenGoControllerConverter.exe");
             string launcherArguments = null;
             try
             {
@@ -266,7 +339,6 @@ namespace CorugeTo.DenGo.ControllerConverter
                 {
                     if (key != null)
                     {
-                        launcherPath = key.GetValue(LauncherPathValue) as string;
                         launcherArguments = key.GetValue(LauncherArgumentsValue) as string;
                     }
                 }
@@ -275,12 +347,13 @@ namespace CorugeTo.DenGo.ControllerConverter
             {
                 WriteLog("APP_AUTOSTART registry-error=" + ex.GetType().Name);
             }
-            if (String.IsNullOrWhiteSpace(launcherPath) || !File.Exists(launcherPath))
+            if (!File.Exists(launcherPath))
             {
-                WriteLog("APP_AUTOSTART failed reason=launcher-not-found");
+                WriteLog("APP_AUTOSTART failed reason=installed-launcher-not-found path=" + launcherPath);
                 StartAppMissingNoticeIfNeeded();
                 return;
             }
+            WriteLog("APP_AUTOSTART launcher=" + launcherPath);
             try
             {
                 string arguments = String.IsNullOrWhiteSpace(launcherArguments)
@@ -594,6 +667,12 @@ namespace CorugeTo.DenGo.ControllerConverter
             snapshot.Emergency = BitConverter.ToInt32(data, 40) != 0;
             snapshot.AutoBrakePosition = BitConverter.ToInt32(data, 44);
             snapshot.UpdatedUtcTicks = BitConverter.ToInt64(data, 48);
+            snapshot.ButtonMask = BitConverter.ToInt32(data, 56);
+            if (snapshot.ButtonMask < 0 || (snapshot.ButtonMask & ~SupportedButtonMask) != 0)
+            {
+                status = "unsupported_button_mask";
+                return false;
+            }
             status = "ok";
             return true;
         }
@@ -611,6 +690,7 @@ namespace CorugeTo.DenGo.ControllerConverter
             internal bool Emergency;
             internal int AutoBrakePosition;
             internal long UpdatedUtcTicks;
+            internal int ButtonMask;
         }
 
         [DllImport("user32.dll", EntryPoint = "MessageBoxW", CharSet = CharSet.Unicode)]

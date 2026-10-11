@@ -24,7 +24,7 @@ PUBLISHER_MUTEX_NAME = r"Local\CorugeTo.DenGo.HandleCommand.Publisher.v1"
 ERROR_ALREADY_EXISTS = 183
 MAPPING_SIZE = 64
 MAGIC = 0x44474843  # "DGHC"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 SNAPSHOT_FORMAT = "<12iq2i"
 SNAPSHOT_SIZE = struct.calcsize(SNAPSHOT_FORMAT)
 
@@ -52,6 +52,7 @@ class BveHandleSnapshot:
     emergency: bool
     auto_brake_position: int
     updated_utc_ticks: int
+    button_mask: int
 
 
 def current_utc_ticks() -> int:
@@ -77,7 +78,7 @@ def pack_snapshot(snapshot: BveHandleSnapshot) -> bytes:
         int(snapshot.emergency),
         snapshot.auto_brake_position,
         snapshot.updated_utc_ticks,
-        0,
+        snapshot.button_mask,
         snapshot.sequence,
     )
 
@@ -100,7 +101,7 @@ def unpack_snapshot(data: bytes) -> Optional[BveHandleSnapshot]:
         emergency,
         auto_brake_position,
         updated_utc_ticks,
-        _reserved,
+        button_mask,
         sequence_end,
     ) = values
     if sequence_start != sequence_end or sequence_start % 2 != 0:
@@ -119,6 +120,7 @@ def unpack_snapshot(data: bytes) -> Optional[BveHandleSnapshot]:
         emergency=bool(emergency),
         auto_brake_position=auto_brake_position,
         updated_utc_ticks=updated_utc_ticks,
+        button_mask=button_mask,
     )
     try:
         _validate_snapshot(snapshot)
@@ -144,6 +146,7 @@ class BveHandleCommandPublisher:
         generation: int,
         enabled: bool,
         valid: bool,
+        button_mask: int = 0,
     ) -> BveHandleSnapshot:
         brake_mode = BRAKE_MODE_VALUES.get(command.brake_mode)
         if brake_mode is None:
@@ -160,6 +163,7 @@ class BveHandleCommandPublisher:
             emergency=command.emergency,
             auto_brake_position=command.auto_brake_position,
             updated_utc_ticks=current_utc_ticks(),
+            button_mask=button_mask,
         )
         self._write_snapshot(snapshot)
         return snapshot
@@ -177,6 +181,7 @@ class BveHandleCommandPublisher:
             emergency=False,
             auto_brake_position=0,
             updated_utc_ticks=current_utc_ticks(),
+            button_mask=0,
         )
         self._write_snapshot(snapshot)
         return snapshot
@@ -232,6 +237,8 @@ def _validate_snapshot(snapshot: BveHandleSnapshot) -> None:
         raise ValueError("auto_brake_position must be between 0 and 3")
     if snapshot.updated_utc_ticks < 0:
         raise ValueError("updated_utc_ticks must not be negative")
+    if snapshot.button_mask < 0 or snapshot.button_mask & ~0x03:
+        raise ValueError("button_mask may contain only START and SELECT bits")
     if snapshot.valid and not snapshot.enabled:
         raise ValueError("valid snapshot must also be enabled")
     if not snapshot.valid:

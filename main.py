@@ -26,6 +26,7 @@ from bve_handle_ipc import BveHandleCommandPublisher
 from platform_detection import EfficientPlatformDetector
 from window_message_backend import WindowMessageBackend, WindowTarget
 from virtual_gamepad_backend import VirtualGamepadBackend
+from hidhide_pcsx2 import HidHidePcsx2Configurator
 from update_checker import CURRENT_VERSION, check_latest_release
 
 try:
@@ -295,6 +296,8 @@ def main():
     active_window_route = None
     input_was_enabled = False
     virtual_gamepad_retry_at = 0.0
+    hidhide_configurator = HidHidePcsx2Configurator()
+    hidhide_pending_reconnect = False
     last_bve_control_config = None
     bve_handle_generation = 0
     bve_handle_was_valid = False
@@ -412,6 +415,11 @@ def main():
                 if now_monotonic >= virtual_gamepad_retry_at:
                     try:
                         virtual_gamepad_backend.connect()
+                        pcsx2_paths = tuple(getattr(single_platform, "executable_paths", ()))
+                        pcsx2_path = pcsx2_paths[0] if len(pcsx2_paths) == 1 else ""
+                        if pcsx2_path and hidhide_configurator.ensure_configured(pcsx2_path):
+                            virtual_gamepad_backend.disconnect()
+                            virtual_gamepad_backend.connect()
                     except RuntimeError as exc:
                         print(f"Virtual gamepad unavailable: {exc}", flush=True)
                         virtual_gamepad_retry_at = now_monotonic + 1.0
@@ -615,10 +623,17 @@ def main():
             now_monotonic = time.monotonic()
             if source_ready:
                 command = resolve_bve_handle_command(cur_p, physical_cur_b, effective_brake_mode, effective_max_power, effective_max_brake)
-                signature = (True, source_valid, bve_handle_generation, command)
+                button_mask = logics["BVE"].button_mask
+                signature = (True, source_valid, bve_handle_generation, command, button_mask)
                 heartbeat_due = now_monotonic - bve_handle_last_publish_monotonic >= bve_handle_heartbeat_seconds
                 if signature != bve_handle_last_signature or heartbeat_due:
-                    bve_handle_publisher.publish_command(command, bve_handle_generation, True, source_valid)
+                    bve_handle_publisher.publish_command(
+                        command,
+                        bve_handle_generation,
+                        True,
+                        source_valid,
+                        button_mask,
+                    )
                     bve_handle_last_signature = signature
                     bve_handle_last_publish_monotonic = now_monotonic
             else:

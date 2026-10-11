@@ -26,7 +26,7 @@ class PlatformWindow:
  process_id:int;window_handle:int;window_title:str;window_class:str
 @dataclass(frozen=True)
 class PlatformStatus:
- platform_id:str;display_name:str;running:bool;process_ids:tuple;window_titles:tuple;windows:tuple
+ platform_id:str;display_name:str;running:bool;process_ids:tuple;executable_paths:tuple;window_titles:tuple;windows:tuple
 PLATFORMS=(("jrets","JRETS"),("bve5","BVE5"),("bve6","BVE6"),("pcsx2","PCSX2"),("rpcs3","RPCS3"),("running_train","RUNNING TRAIN"))
 def _target_processes():
  s=kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS,0)
@@ -88,10 +88,10 @@ def _scan(ps):
   ws=w.get(pid,[])
   if not ws:u=True;continue
   q=_classify(pid,n,_path(pid),ws)
-  if q:f[q].append((pid,tuple((hwnd,t,c) for hwnd,t,c in ws)))
- return tuple(PlatformStatus(p,l,bool(f[p]),tuple(e[0] for e in f[p]),tuple(t for e in f[p] for _,t,_ in e[1] if t),tuple(PlatformWindow(e[0],hwnd,t,c) for e in f[p] for hwnd,t,c in e[1])) for p,l in PLATFORMS),u
+  if q:f[q].append((pid,_path(pid),tuple((hwnd,t,c) for hwnd,t,c in ws)))
+ return tuple(PlatformStatus(p,l,bool(f[p]),tuple(e[0] for e in f[p]),tuple(e[1] for e in f[p]),tuple(t for e in f[p] for _,t,_ in e[2] if t),tuple(PlatformWindow(e[0],hwnd,t,c) for e in f[p] for hwnd,t,c in e[2])) for p,l in PLATFORMS),u
 class EfficientPlatformDetector:
- def __init__(self,probe_interval=.2,full_resync_interval=3.):self.probe_interval=probe_interval;self.full_resync_interval=full_resync_interval;self.a=0.;self.b=0.;self.s=None;self.u=True;self.v=tuple(PlatformStatus(p,n,False,(),(),()) for p,n in PLATFORMS)
+ def __init__(self,probe_interval=.2,full_resync_interval=3.):self.probe_interval=probe_interval;self.full_resync_interval=full_resync_interval;self.a=0.;self.b=0.;self.s=None;self.u=True;self.v=tuple(PlatformStatus(p,n,False,(),(),(),()) for p,n in PLATFORMS)
  def update(self):
   now=time.monotonic()
   if now-self.a<self.probe_interval:return self.v
