@@ -349,6 +349,114 @@ function Write-InstallMarker {
     $state = [pscustomobject][ordered]@{SchemaVersion=1;ProductVersion='2.0.0';State='Installing';Started=[System.DateTimeOffset]::Now.ToString('o')}
     [System.IO.File]::WriteAllText($installMarker,($state | ConvertTo-Json -Depth 3),(New-Object System.Text.UTF8Encoding($true)))
 }
+function Write-InstalledState {
+    param([object[]]$Plan,[object[]]$ApplyResults,[string]$BackupRoot,[bool]$ShortcutRequested,[bool]$ShortcutCreated,[string]$ShortcutPath)
+    [System.IO.Directory]::CreateDirectory($installerStateRoot) | Out-Null
+    $statePath = Join-Path $installerStateRoot 'installed-state.json'
+    $previous = $null
+    if ([System.IO.File]::Exists($statePath)) {
+        try { $previous = [System.IO.File]::ReadAllText($statePath,[System.Text.Encoding]::UTF8) | ConvertFrom-Json } catch { $previous = $null }
+    }
+    $files = New-Object System.Collections.ArrayList
+    foreach ($item in @($Plan)) {
+        $destination = [string]$item.Destination
+        $apply = @($ApplyResults | Where-Object {
+            [string]::Equals([string]$_.Platform,[string]$item.Platform,[System.StringComparison]::Ordinal) -and
+            [string]::Equals([string]$_.Component,[string]$item.Component,[System.StringComparison]::Ordinal) -and
+            [string]::Equals([string]$_.Destination,$destination,[System.StringComparison]::OrdinalIgnoreCase)
+        })
+        $action = [string]$item.Action
+        $backup = ''
+        if (@($apply).Count -eq 1) { $backup = [string]$apply[0].Backup }
+        $ownership = 'NotManaged'
+        $existedBefore = $false
+        $beforeSha = ''
+        if ([string]::Equals($action,'Add',[System.StringComparison]::Ordinal)) {
+            $ownership = 'CreatedByInstaller'
+        } elseif ([string]::Equals($action,'UpdateOrRepair',[System.StringComparison]::Ordinal)) {
+            $previousItems = @()
+            if ($null -ne $previous -and $null -ne $previous.Files) {
+                $previousItems = @($previous.Files | Where-Object { [string]::Equals([string]$_.Destination,$destination,[System.StringComparison]::OrdinalIgnoreCase) })
+            }
+            if (@($previousItems).Count -eq 1) {
+                $previousOwnership = [string]$previousItems[0].Ownership
+                if ([string]::Equals($previousOwnership,'ReplacedExisting',[System.StringComparison]::Ordinal) -and -not [string]::Equals([string]$item.Component,'InputProfile',[System.StringComparison]::Ordinal)) {
+                    $ownership = 'MigratedMatchingDenGoFile'
+                    $existedBefore = $false
+                    $beforeSha = ''
+                    $backup = ''
+                } else {
+                    $ownership = $previousOwnership
+                    $existedBefore = [bool]$previousItems[0].ExistedBefore
+                    $beforeSha = [string]$previousItems[0].BeforeSHA256
+                    $backup = [string]$previousItems[0].Backup
+                }
+            } elseif ([string]::Equals([string]$item.Component,'InputProfile',[System.StringComparison]::Ordinal)) {
+                $ownership = 'ReplacedExisting'
+                $existedBefore = -not [string]::IsNullOrWhiteSpace($backup)
+                if ($existedBefore -and [System.IO.File]::Exists($backup)) { $beforeSha = Get-Sha256 $backup }
+            } else {
+                $ownership = 'MigratedMatchingDenGoFile'
+                $existedBefore = $false
+                $beforeSha = ''
+                $backup = ''
+            }
+        } elseif ([string]::Equals($action,'Unchanged',[System.StringComparison]::Ordinal)) {
+            $previousItems = @()
+            if ($null -ne $previous -and $null -ne $previous.Files) {
+                $previousItems = @($previous.Files | Where-Object { [string]::Equals([string]$_.Destination,$destination,[System.StringComparison]::OrdinalIgnoreCase) })
+            }
+            if (@($previousItems).Count -eq 1) {
+                $previousOwnership = [string]$previousItems[0].Ownership
+                if ([string]::Equals($previousOwnership,'ReplacedExisting',[System.StringComparison]::Ordinal) -and -not [string]::Equals([string]$item.Component,'InputProfile',[System.StringComparison]::Ordinal)) {
+                    $ownership = 'MigratedMatchingDenGoFile'
+                    $existedBefore = $false
+                    $beforeSha = ''
+                    $backup = ''
+                } else {
+                    $ownership = $previousOwnership
+                    $existedBefore = [bool]$previousItems[0].ExistedBefore
+                    $beforeSha = [string]$previousItems[0].BeforeSHA256
+                    $backup = [string]$previousItems[0].Backup
+                }
+            } else {
+                $ownership = 'MigratedMatchingDenGoFile'
+            }
+        } elseif ([string]::Equals($action,'PreserveUserModified',[System.StringComparison]::Ordinal)) {
+            $ownership = 'PreservedUserFile'
+        } elseif ([string]::Equals($action,'NotInitialized',[System.StringComparison]::Ordinal)) {
+            $ownership = 'NotInstalled'
+        }
+        $afterSha = ''
+        if ([System.IO.File]::Exists($destination)) { $afterSha = Get-Sha256 $destination }
+        [void]$files.Add([pscustomobject][ordered]@{
+            Platform=[string]$item.Platform
+            Component=[string]$item.Component
+            Destination=$destination
+            InstallAction=$action
+            Ownership=$ownership
+            ExistedBefore=$existedBefore
+            BeforeSHA256=$beforeSha
+            AfterSHA256=$afterSha
+            Backup=$backup
+        })
+    }
+    $state = [pscustomobject][ordered]@{
+        SchemaVersion=1
+        ProductVersion='2.0.0'
+        InstalledAt=[System.DateTimeOffset]::Now.ToString('o')
+        BackupRoot=$BackupRoot
+        Shortcut=[pscustomobject][ordered]@{Requested=$ShortcutRequested;Created=$ShortcutCreated;Path=$ShortcutPath}
+        Files=[object[]]@($files)
+    }
+    $temporary = $statePath + '.tmp'
+    [System.IO.File]::WriteAllText($temporary,($state | ConvertTo-Json -Depth 7),(New-Object System.Text.UTF8Encoding($true)))
+    $verification = [System.IO.File]::ReadAllText($temporary,[System.Text.Encoding]::UTF8) | ConvertFrom-Json
+    if ([int]$verification.SchemaVersion -ne 1) { throw 'Installed-state verification failed.' }
+    [System.IO.File]::Copy($temporary,$statePath,$true)
+    [System.IO.File]::Delete($temporary)
+    return $statePath
+}
 function Invoke-RealApply {
     param([object[]]$Plan,[string]$BackupRootOverride)
     Assert-TargetProcessesStopped
@@ -514,6 +622,16 @@ if ($Apply -and $RealSystem) {
                 $shortcutCreated=[bool]$shortcutResult.Created;$shortcutPath=[string]$shortcutResult.Path;$shortcutError=[string]$shortcutResult.Error
             } else { $shortcutError='Core application plan was not unique.' }
         } else { $shortcutError='Shortcut was not created because Real Apply did not succeed.' }
+    }
+    if ($succeeded) {
+        try {
+            [void](Write-InstalledState ([object[]]@($plan)) ([object[]]@($applyResults)) $backupRoot $shortcutRequested $shortcutCreated $shortcutPath)
+        } catch {
+            $succeeded=$false
+            $errorCode='InstalledStateWriteFailed'
+            $errorMessage=[string]$_.Exception.Message
+            $failedSet='InstallerState'
+        }
     }
     if ($succeeded -and [System.IO.File]::Exists($installMarker)) { [System.IO.File]::Delete($installMarker) }
 } elseif ($Apply) {
