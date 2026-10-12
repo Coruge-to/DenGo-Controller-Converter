@@ -229,7 +229,10 @@ function Start-SandboxApply {
     if([bool]$shortcut.Tag.Checked){$args+='-CreateDesktopShortcut'}
     if($script:decisions.ContainsKey('PCSX2')-and$script:decisions['PCSX2']-eq'replace'){$args+='-ReplaceModifiedPCSX2Profile'}
     if($script:decisions.ContainsKey('RPCS3')-and$script:decisions['RPCS3']-eq'replace'){$args+='-ReplaceModifiedRPCS3Profile'}
-    $script:process=Start-Process powershell.exe -ArgumentList $args -PassThru -WindowStyle Hidden
+    [System.IO.Directory]::CreateDirectory($applyOutput) | Out-Null
+    $applyStdout = Join-Path $applyOutput 'engine-stdout.txt'
+    $applyStderr = Join-Path $applyOutput 'engine-stderr.txt'
+    $script:process=Start-Process powershell.exe -ArgumentList $args -PassThru -WindowStyle Hidden -RedirectStandardOutput $applyStdout -RedirectStandardError $applyStderr
     $timer.Start()
 }
 function Stop-CurrentProcess {

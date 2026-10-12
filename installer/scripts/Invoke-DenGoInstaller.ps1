@@ -271,11 +271,16 @@ function Invoke-DesktopShortcut {
         $shortcut = $shell.CreateShortcut($shortcutPath)
         $shortcut.TargetPath = $ApplicationPath
         $shortcut.WorkingDirectory = [System.IO.Path]::GetDirectoryName($ApplicationPath)
+        $iconPath = Join-Path ([System.IO.Path]::GetDirectoryName($ApplicationPath)) 'DenGo-Controller-Converter.ico'
+        if (-not [System.IO.File]::Exists($iconPath)) { throw 'Installed shortcut icon was not found.' }
+        $shortcut.IconLocation = $iconPath + ',0'
         $shortcut.Save()
         if (-not [System.IO.File]::Exists($shortcutPath)) { throw 'Shortcut file was not created.' }
         $verify = $shell.CreateShortcut($shortcutPath)
         if (-not [string]::Equals([System.IO.Path]::GetFullPath([string]$verify.TargetPath),[System.IO.Path]::GetFullPath($ApplicationPath),[System.StringComparison]::OrdinalIgnoreCase)) { throw 'Shortcut target verification failed.' }
         if (-not [string]::Equals([System.IO.Path]::GetFullPath([string]$verify.WorkingDirectory),[System.IO.Path]::GetFullPath([System.IO.Path]::GetDirectoryName($ApplicationPath)),[System.StringComparison]::OrdinalIgnoreCase)) { throw 'Shortcut working directory verification failed.' }
+        $verifyIconPath = ([string]$verify.IconLocation).Split(',')[0]
+        if (-not [string]::Equals([System.IO.Path]::GetFullPath($verifyIconPath),[System.IO.Path]::GetFullPath($iconPath),[System.StringComparison]::OrdinalIgnoreCase)) { throw 'Shortcut icon verification failed.' }
         return [pscustomobject]@{Requested=$true;Created=$true;Path=$shortcutPath;Error=''}
     } catch {
         return [pscustomobject]@{Requested=$true;Created=$false;Path=$shortcutPath;Error=[string]$_.Exception.Message}
@@ -502,6 +507,7 @@ function New-PlanItem {
 [System.IO.Directory]::CreateDirectory($outputRoot) | Out-Null
 $sources = @{
     Application=Join-Path $payload 'DenGoControllerConverter.exe'
+    Icon=Join-Path ([System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))) 'assets\images\DenGo-Controller-Converter.ico'
     Caller=Join-Path $payload 'DenGoControllerConverter.dll'
     CurrentBridge=Join-Path $payload 'DenGoVehicleSpec.BveEx.Bridge.dll'
     CurrentVehicleSpec=Join-Path $payload 'DenGoBveVehicleSpec.dll'
@@ -580,6 +586,7 @@ $rpcs3 = @($detected | Where-Object { [string]::Equals([string]$_.Platform,'RPCS
 
 $plan = New-Object System.Collections.ArrayList
 [void]$plan.Add((New-PlanItem 'Core' 'Application' $sources.Application (Join-Path $env:LOCALAPPDATA 'Programs\DenGo Controller Converter\DenGoControllerConverter.exe') $true $false))
+[void]$plan.Add((New-PlanItem 'Core' 'Icon' $sources.Icon (Join-Path $env:LOCALAPPDATA 'Programs\DenGo Controller Converter\DenGo-Controller-Converter.ico') $true $false))
 foreach ($item in $bve) { [void]$plan.Add((New-PlanItem ([string]$item.Mode) 'Caller' $sources.Caller (Join-Path ([string]$item.InputDevices) 'DenGoControllerConverter.dll') $true $false)) }
 $currentDir='C:\Users\Public\Documents\BveEx\2.0\Extensions'
 if ([System.IO.Directory]::Exists($currentDir)) {

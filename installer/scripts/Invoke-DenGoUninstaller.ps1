@@ -1,4 +1,4 @@
-param(
+﻿param(
     [switch]$DryRun,
     [switch]$Apply,
     [switch]$RealSystem,
@@ -132,7 +132,28 @@ if ($null -ne $state.Shortcut -and [bool]$state.Shortcut.Created -and -not [stri
     $shortcutPath = [string]$state.Shortcut.Path
     $shortcutExists = [System.IO.File]::Exists($shortcutPath)
     $shortcutAction = if ($shortcutExists) { 'Remove' } else { 'AlreadyMissing' }
-    [void]$shortcutItems.Add([pscustomobject][ordered]@{Path=$shortcutPath;Action=$shortcutAction;Exists=$shortcutExists})
+    [void]$shortcutItems.Add([pscustomobject][ordered]@{Path=$shortcutPath;Action=$shortcutAction;Exists=$shortcutExists;Source='InstalledState'})
+}
+$coreItems = @($items | Where-Object {
+    [string]::Equals([string]$_.Platform,'Core',[System.StringComparison]::Ordinal) -and
+    [string]::Equals([string]$_.Component,'Application',[System.StringComparison]::Ordinal)
+})
+if (@($coreItems).Count -eq 1) {
+    $desktopPath = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::Desktop)
+    $defaultShortcutPath = Join-Path $desktopPath 'DenGo Controller Converter.lnk'
+    $alreadyRecorded = @($shortcutItems | Where-Object { [string]::Equals([string]$_.Path,$defaultShortcutPath,[System.StringComparison]::OrdinalIgnoreCase) }).Count -gt 0
+    if (-not $alreadyRecorded -and [System.IO.File]::Exists($defaultShortcutPath)) {
+        try {
+            $shell = New-Object -ComObject WScript.Shell
+            $shortcut = $shell.CreateShortcut($defaultShortcutPath)
+            $shortcutTarget = [System.IO.Path]::GetFullPath([string]$shortcut.TargetPath)
+            $coreDestination = [System.IO.Path]::GetFullPath([string]$coreItems[0].Destination)
+            if ([string]::Equals($shortcutTarget,$coreDestination,[System.StringComparison]::OrdinalIgnoreCase)) {
+                [void]$shortcutItems.Add([pscustomobject][ordered]@{Path=$defaultShortcutPath;Action='Remove';Exists=$true;Source='MatchingDefaultDesktopShortcut'})
+            }
+        } catch {
+        }
+    }
 }
 
 $applyResults = New-Object System.Collections.ArrayList
