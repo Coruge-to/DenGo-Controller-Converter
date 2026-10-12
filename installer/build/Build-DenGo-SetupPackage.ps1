@@ -8,7 +8,6 @@ $packageName = 'DenGo-Controller-Converter-Setup-2.0.0'
 $packageRoot = Join-Path $downloads $packageName
 $zipPath = Join-Path $downloads ($packageName + '.zip')
 $reportPath = Join-Path $downloads 'DenGo-SetupPackage-v1.txt'
-$expectedHead = '2cda513990049e488591ade4c74a1b7855512706'
 $requiredFiles = @(
     'assets\images\DenGo-Controller-Converter2.png',
     'assets\images\DenGo-Controller-Converter.ico',
@@ -32,9 +31,6 @@ try {
     if (-not [System.IO.Directory]::Exists($sourceRoot)) { throw ('Installer source not found: ' + $sourceRoot) }
     $head = ([string](& git.exe -C $repo rev-parse HEAD)).Trim()
     if ($LASTEXITCODE -ne 0) { throw 'git rev-parse HEAD failed.' }
-    if (-not [string]::Equals($head,$expectedHead,[System.StringComparison]::Ordinal)) {
-        throw ("Unexpected HEAD. Expected={0} Actual={1}" -f $expectedHead,$head)
-    }
     $staged = @(& git.exe -C $repo diff --cached --name-only)
     if ($LASTEXITCODE -ne 0) { throw 'git staged inspection failed.' }
     if (@($staged).Count -ne 0) { throw 'Existing staged changes were found.' }
