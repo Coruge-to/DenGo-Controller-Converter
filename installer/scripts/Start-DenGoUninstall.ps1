@@ -29,6 +29,20 @@ function Show-ForegroundInformation {
     }
 }
 
+function Join-NativeArguments {
+    param([string[]]$Values)
+    $parts = New-Object System.Collections.ArrayList
+    foreach ($value in @($Values)) {
+        $text = [string]$value
+        if ($text.IndexOf([char]34) -ge 0) { throw 'A process argument contains a double quote.' }
+        $trailing = 0
+        for ($index = $text.Length - 1; $index -ge 0 -and $text[$index] -eq [char]92; $index--) { $trailing++ }
+        $suffix = if ($trailing -gt 0) { [string][char]92 * $trailing } else { '' }
+        [void]$parts.Add(([string][char]34 + $text + $suffix + [string][char]34))
+    }
+    return [string]::Join(' ',[string[]]@($parts))
+}
+
 $gui = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\gui\DenGoUninstallerGui.ps1'))
 if (-not [System.IO.File]::Exists($gui)) { throw ('Uninstaller GUI not found: ' + $gui) }
 
@@ -36,7 +50,7 @@ if (-not (Test-Administrator)) {
     $arguments = @('-NoProfile','-ExecutionPolicy','Bypass','-WindowStyle','Hidden','-File',$MyInvocation.MyCommand.Path,'-Elevated')
     $startInfo = New-Object System.Diagnostics.ProcessStartInfo
     $startInfo.FileName = 'powershell.exe'
-    $startInfo.Arguments = [string]::Join(' ',[string[]]@($arguments | ForEach-Object { if ([string]$_ -match '[" ]') { '"' + ([string]$_).Replace('"','\"') + '"' } else { [string]$_ } }))
+    $startInfo.Arguments = Join-NativeArguments $arguments
     $startInfo.Verb = 'runas'
     $startInfo.UseShellExecute = $true
     $startInfo.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden

@@ -200,6 +200,78 @@ function Confirm-Cancel {
     return $answer -eq [System.Windows.Forms.DialogResult]::Yes
 }
 
+function Get-PeMachineForRunningProduct {
+    param([string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not [System.IO.File]::Exists($Path)) { return '' }
+    $stream = [System.IO.File]::Open($Path,[System.IO.FileMode]::Open,[System.IO.FileAccess]::Read,[System.IO.FileShare]::ReadWrite)
+    try {
+        $reader = New-Object System.IO.BinaryReader($stream)
+        if ($reader.ReadUInt16() -ne 0x5A4D) { return '' }
+        $stream.Position = 0x3C
+        $offset = $reader.ReadInt32()
+        if ($offset -lt 0 -or $offset -gt ($stream.Length - 6)) { return '' }
+        $stream.Position = $offset
+        if ($reader.ReadUInt32() -ne 0x00004550) { return '' }
+        $machine = $reader.ReadUInt16()
+        if ($machine -eq 0x014C) { return 'x86' }
+        if ($machine -eq 0x8664) { return 'x64' }
+        return ''
+    } finally {
+        $stream.Dispose()
+    }
+}
+function Get-RunningProductNames {
+    $running = @(Get-CimInstance Win32_Process | Where-Object {
+        [string]::Equals([string]$_.Name,'BveTs.exe',[System.StringComparison]::OrdinalIgnoreCase) -or
+        [string]::Equals([string]$_.Name,'rpcs3.exe',[System.StringComparison]::OrdinalIgnoreCase) -or
+        [string]::Equals([string]$_.Name,'DenGoControllerConverter.exe',[System.StringComparison]::OrdinalIgnoreCase) -or
+        [string]::Equals([string]$_.Name,'pcsx2-qt.exe',[System.StringComparison]::OrdinalIgnoreCase) -or
+        [string]::Equals([string]$_.Name,'pcsx2.exe',[System.StringComparison]::OrdinalIgnoreCase)
+    })
+    $products = New-Object System.Collections.ArrayList
+    foreach ($process in $running) {
+        $name = [string]$process.Name
+        if ([string]::Equals($name,'BveTs.exe',[System.StringComparison]::OrdinalIgnoreCase)) {
+            $machine = Get-PeMachineForRunningProduct ([string]$process.ExecutablePath)
+            $product = if ($machine -eq 'x64') { 'BVE Trainsim 6' } elseif ($machine -eq 'x86') { 'BVE Trainsim 5' } else { 'BVE Trainsim' }
+        } elseif ([string]::Equals($name,'rpcs3.exe',[System.StringComparison]::OrdinalIgnoreCase)) {
+            $product = 'RPCS3'
+        } elseif ([string]::Equals($name,'DenGoControllerConverter.exe',[System.StringComparison]::OrdinalIgnoreCase)) {
+            $product = 'DenGo Controller Converter'
+        } else {
+            $product = 'PCSX2'
+        }
+        if (-not @($products).Contains($product)) { [void]$products.Add($product) }
+    }
+    $order = @('BVE Trainsim 6','BVE Trainsim 5','BVE Trainsim','PCSX2','RPCS3','DenGo Controller Converter')
+    return [string[]]@($products | Sort-Object { [array]::IndexOf($order,[string]$_) })
+}
+function Confirm-RunningProductsClosed {
+    while ($true) {
+        $products = @(Get-RunningProductNames)
+        if (@($products).Count -eq 0) { return $true }
+        $list = [string]::Join([System.Environment]::NewLine,[string[]]@($products | ForEach-Object { [string][char]0x30FB + [string]$_ }))
+        $message = '対応ソフトをすべて終了してから「再試行」を押してください' + [System.Environment]::NewLine + [System.Environment]::NewLine + '起動中の対応ソフト：' + [System.Environment]::NewLine + $list
+        $answer = [System.Windows.Forms.MessageBox]::Show($message,'対応ソフトが起動しています',[System.Windows.Forms.MessageBoxButtons]::RetryCancel,[System.Windows.Forms.MessageBoxIcon]::Warning)
+        if ($answer -eq [System.Windows.Forms.DialogResult]::Retry) { continue }
+        return $false
+    }
+}
+
+function Join-NativeArguments {
+    param([string[]]$Values)
+    $parts = New-Object System.Collections.ArrayList
+    foreach ($value in @($Values)) {
+        $text = [string]$value
+        if ($text.IndexOf([char]34) -ge 0) { throw 'A process argument contains a double quote.' }
+        $trailing = 0
+        for ($index = $text.Length - 1; $index -ge 0 -and $text[$index] -eq [char]92; $index--) { $trailing++ }
+        $suffix = if ($trailing -gt 0) { [string][char]92 * $trailing } else { '' }
+        [void]$parts.Add(([string][char]34 + $text + $suffix + [string][char]34))
+    }
+    return [string]::Join(' ',[string[]]@($parts))
+}
+
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = 35
 $timer.Add_Tick({
@@ -232,6 +304,10 @@ $timer.Add_Tick({
 
 $startButton.Add_Click({
     if ($Preview) { Set-Page 'progress';$script:previewTimer=New-Object System.Windows.Forms.Timer;$script:previewTimer.Interval=700;$script:previewTimer.Add_Tick({$script:previewTimer.Stop();$script:previewTimer.Dispose();$script:previewTimer=$null;Set-Page 'complete'});$script:previewTimer.Start();return }
+    if (-not (Confirm-RunningProductsClosed)) {
+        if (Confirm-Cancel) { $script:allowClose=$true;$form.Close() }
+        return
+    }
     if (-not [System.IO.File]::Exists($engine)) {
         [System.Windows.Forms.MessageBox]::Show(('アンインストールエンジンが見つかりません。' + [System.Environment]::NewLine + $engine),'DenGo アンインストール',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
         return
@@ -241,7 +317,7 @@ $startButton.Add_Click({
     Set-Page 'progress'
     $script:barX=1;$script:barStep=7;$block.Left=1
     $arguments = @('-NoProfile','-ExecutionPolicy','Bypass','-File',$engine,'-Apply','-RealSystem','-ConfirmRealApply','UNINSTALL','-OutputRoot',$script:outputRoot)
-    $script:process = Start-Process powershell.exe -ArgumentList $arguments -PassThru -WindowStyle Hidden
+    $argumentLine=Join-NativeArguments $arguments;$script:process=Start-Process powershell.exe -ArgumentList $argumentLine -PassThru -WindowStyle Hidden
     $timer.Start()
 })
 $cancelButton.Add_Click({ if (Confirm-Cancel) { $script:allowClose=$true;$form.Close() } })

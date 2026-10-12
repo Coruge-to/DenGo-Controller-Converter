@@ -94,7 +94,8 @@ function Get-Platform {
     param([string]$Name)
     if ([string]::Equals($Name,'BveTs.exe',[System.StringComparison]::OrdinalIgnoreCase)) { return 'BVE' }
     if ([string]::Equals($Name,'rpcs3.exe',[System.StringComparison]::OrdinalIgnoreCase)) { return 'RPCS3' }
-    if ($Name -match '(?i)\Apcsx2[^\\/]*[.]exe\z') { return 'PCSX2' }
+    if ([string]::Equals($Name,'pcsx2-qt.exe',[System.StringComparison]::OrdinalIgnoreCase) -or [string]::Equals($Name,'pcsx2.exe',[System.StringComparison]::OrdinalIgnoreCase)) { return 'PCSX2' }
+    if ($Name -match '(?i)pcsx2' -and $Name -notmatch '(?i)(uninst|installer|setup|update)' -and [string]::Equals([System.IO.Path]::GetExtension($Name),'.exe',[System.StringComparison]::OrdinalIgnoreCase)) { return 'PCSX2' }
     return ''
 }
 
@@ -187,9 +188,9 @@ function Add-FixedDriveExecutables {
                     $path = Join-Path $directory $fileName
                     if ([System.IO.File]::Exists($path)) { Add-Executable $List (Get-Platform $fileName) $path ('AdditionalFixedDriveSearch:' + $drive.Name) '' }
                 }
-                foreach ($path in @([System.IO.Directory]::GetFiles($directory,'pcsx2*.exe',[System.IO.SearchOption]::TopDirectoryOnly))) {
+                foreach ($path in @([System.IO.Directory]::GetFiles($directory,'*pcsx2*.exe',[System.IO.SearchOption]::TopDirectoryOnly))) {
                     $name = [System.IO.Path]::GetFileName($path)
-                    if ($name -match '(?i)\Apcsx2[^\\/]*[.]exe\z') { Add-Executable $List 'PCSX2' $path ('AdditionalFixedDriveSearch:' + $drive.Name) '' }
+                    if ($name -notmatch '(?i)(uninst|installer|setup|update)') { Add-Executable $List 'PCSX2' $path ('AdditionalFixedDriveSearch:' + $drive.Name) '' }
                 }
                 foreach ($child in @([System.IO.Directory]::GetDirectories($directory))) {
                     $name = [System.IO.Path]::GetFileName($child)
@@ -287,19 +288,22 @@ function Invoke-DesktopShortcut {
     }
 }
 
-function Assert-TargetProcessesStopped {
+function Get-RunningTargetProducts {
     $running = @(Get-CimInstance Win32_Process | Where-Object {
-        [string]::Equals([string]$_.Name,'BveTs.exe',[System.StringComparison]::OrdinalIgnoreCase) -or
-        [string]::Equals([string]$_.Name,'rpcs3.exe',[System.StringComparison]::OrdinalIgnoreCase) -or
-        [string]::Equals([string]$_.Name,'DenGoControllerConverter.exe',[System.StringComparison]::OrdinalIgnoreCase) -or
-        ([string]$_.Name -match '(?i)\Apcsx2[^\\/]*[.]exe\z')
+        [string]::Equals([string]$_.Name,'BveTs.exe',[System.StringComparison]::OrdinalIgnoreCase) -or [string]::Equals([string]$_.Name,'rpcs3.exe',[System.StringComparison]::OrdinalIgnoreCase) -or [string]::Equals([string]$_.Name,'DenGoControllerConverter.exe',[System.StringComparison]::OrdinalIgnoreCase) -or [string]::Equals([string]$_.Name,'pcsx2-qt.exe',[System.StringComparison]::OrdinalIgnoreCase) -or [string]::Equals([string]$_.Name,'pcsx2.exe',[System.StringComparison]::OrdinalIgnoreCase)
     })
-    if (@($running).Count -ne 0) {
-        $names = [string]::Join(', ',[string[]]@($running | ForEach-Object { [string]$_.Name } | Sort-Object -Unique))
-        throw ("Close target processes before Apply: {0}" -f $names)
+    $products = New-Object System.Collections.ArrayList
+    foreach ($process in $running) {
+        $name=[string]$process.Name
+        $product=if([string]::Equals($name,'BveTs.exe',[System.StringComparison]::OrdinalIgnoreCase)){'BVE Trainsim'}elseif([string]::Equals($name,'rpcs3.exe',[System.StringComparison]::OrdinalIgnoreCase)){'RPCS3'}elseif([string]::Equals($name,'DenGoControllerConverter.exe',[System.StringComparison]::OrdinalIgnoreCase)){'DenGo Controller Converter'}else{'PCSX2'}
+        if(-not @($products).Contains($product)){[void]$products.Add($product)}
     }
+    return [string[]]@($products | Sort-Object)
 }
-
+function Assert-TargetProcessesStopped {
+    $products=@(Get-RunningTargetProducts)
+    if(@($products).Count-ne0){throw ("BlockedByRunningProcesses|RunningProducts={0}" -f ([string]::Join(',',[string[]]@($products))))}
+}
 function Restore-AppliedItems {
     param([object[]]$AppliedItems)
     foreach ($entry in @($AppliedItems | Sort-Object Sequence -Descending)) {
@@ -528,7 +532,11 @@ Add-ShortcutRootExecutables $candidates 'CommonDesktop' ([System.Environment]::G
 Add-ShortcutRootExecutables $candidates 'UserStartMenu' ([System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::StartMenu)) $true $shell
 Add-ShortcutRootExecutables $candidates 'CommonStartMenu' ([System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::CommonStartMenu)) $true $shell
 
-$processes = @(Get-CimInstance Win32_Process | Where-Object { $_.Name -match '(?i)\A(?:bvets|rpcs3|pcsx2[^\\/]*)[.]exe\z' })
+$processes = @(Get-CimInstance Win32_Process | Where-Object {
+    [string]::Equals([string]$_.Name,'BveTs.exe',[System.StringComparison]::OrdinalIgnoreCase) -or
+    [string]::Equals([string]$_.Name,'rpcs3.exe',[System.StringComparison]::OrdinalIgnoreCase) -or
+    (([string]$_.Name -match '(?i)pcsx2') -and ([string]$_.Name -notmatch '(?i)(uninst|installer|setup|update)') -and [string]::Equals([System.IO.Path]::GetExtension([string]$_.Name),'.exe',[System.StringComparison]::OrdinalIgnoreCase))
+})
 foreach ($process in $processes) { Add-Executable $candidates (Get-Platform ([string]$process.Name)) ([string]$process.ExecutablePath) 'RunningProcess' ([string]$process.CommandLine) }
 
 $commonRoots = @(
@@ -542,7 +550,7 @@ foreach ($root in $commonRoots) {
     foreach ($file in @(Get-ChildItem -LiteralPath $root -Recurse -File -ErrorAction SilentlyContinue | Where-Object {
         [string]::Equals($_.Name,'BveTs.exe',[System.StringComparison]::OrdinalIgnoreCase) -or
         [string]::Equals($_.Name,'rpcs3.exe',[System.StringComparison]::OrdinalIgnoreCase) -or
-        $_.Name -match '(?i)\Apcsx2[^\\/]*[.]exe\z'
+        (($_.Name -match '(?i)pcsx2') -and ($_.Name -notmatch '(?i)(uninst|installer|setup|update)') -and [string]::Equals([System.IO.Path]::GetExtension($_.Name),'.exe',[System.StringComparison]::OrdinalIgnoreCase))
     })) {
         Add-Executable $candidates (Get-Platform $file.Name) $file.FullName ('CommonRoot:' + $root) ''
     }
@@ -550,7 +558,17 @@ foreach ($root in $commonRoots) {
 
 if ($AdditionalSearch) { Add-FixedDriveExecutables $candidates 120 }
 
-$detected = New-Object System.Collections.ArrayList
+$exactPCSX2Names = @('pcsx2-qt.exe','pcsx2.exe')
+$exactPCSX2Candidates = @($candidates | Where-Object {
+    [string]::Equals([string]$_.Platform,'PCSX2',[System.StringComparison]::Ordinal) -and
+    $exactPCSX2Names -contains [System.IO.Path]::GetFileName([string]$_.Executable)
+})
+if (@($exactPCSX2Candidates).Count -gt 0) {
+    $candidates = @($candidates | Where-Object {
+        -not [string]::Equals([string]$_.Platform,'PCSX2',[System.StringComparison]::Ordinal) -or
+        $exactPCSX2Names -contains [System.IO.Path]::GetFileName([string]$_.Executable)
+    })
+}$detected = New-Object System.Collections.ArrayList
 foreach ($candidate in $candidates) {
     $exeDirectory = [System.IO.Path]::GetDirectoryName([string]$candidate.Executable)
     $state = 'Detected'
@@ -566,10 +584,18 @@ foreach ($candidate in $candidates) {
         $portable = [System.IO.File]::Exists((Join-Path $exeDirectory 'portable.ini')) -or [System.IO.File]::Exists((Join-Path $exeDirectory 'portable.txt')) -or (([string]$candidate.Arguments) -match '(?i)(?:\A|\s)-portable(?:\s|\z)')
         $mode = if ($portable) { 'Portable' } else { 'CentralConfiguration' }
         $configurationRoot = if ($portable) { $exeDirectory } else { Join-Path ([System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::MyDocuments)) 'PCSX2' }
-        $ini = Join-Path $configurationRoot 'inis\LilyPad.ini'
-        if ([System.IO.File]::Exists($ini)) {
-            $pathLines = @([System.IO.File]::ReadAllLines($ini,[System.Text.Encoding]::Default) | Where-Object { $_ -match '\ALast Config Path=' })
+        $legacyIni = Join-Path $configurationRoot 'inis\LilyPad.ini'
+        $currentIni = Join-Path $configurationRoot 'inis\PCSX2.ini'
+        if ([System.IO.File]::Exists($legacyIni)) {
+            $mode = $mode + '-LegacyLilyPad'
+            $pathLines = @([System.IO.File]::ReadAllLines($legacyIni,[System.Text.Encoding]::Default) | Where-Object { $_ -match '\ALast Config Path=' })
             if (@($pathLines).Count -eq 1) { $profileDirectory=([string]$pathLines[0]).Substring('Last Config Path='.Length).Trim() } else { $state='UnsupportedOrAmbiguous' }
+        } elseif ([System.IO.File]::Exists($currentIni)) {
+            $currentText = [System.IO.File]::ReadAllText($currentIni,[System.Text.Encoding]::UTF8)
+            if ($currentText.IndexOf('[InputSources]',[System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and $currentText.IndexOf('[Pad]',[System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and $currentText.IndexOf('[Pad1]',[System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                $mode = $mode + '-CurrentIntegrated'
+                $profileDirectory = $currentIni
+            } else { $state='DetectedButNotInitialized' }
         } else { $state='DetectedButNotInitialized' }
     } elseif ([string]::Equals([string]$candidate.Platform,'RPCS3',[System.StringComparison]::Ordinal)) {
         $mode='ExecutableRelativeConfig'
@@ -598,7 +624,7 @@ if ([System.IO.Directory]::Exists($legacyDir)) {
     [void]$plan.Add((New-PlanItem 'AtsEX Legacy' 'Bridge' $sources.LegacyBridge (Join-Path $legacyDir 'DenGoVehicleSpec.AtsExLegacy.Bridge.dll') $false $false))
     [void]$plan.Add((New-PlanItem 'AtsEX Legacy' 'VehicleSpec' $sources.LegacyVehicleSpec (Join-Path $legacyDir 'DenGoAtsExLegacyVehicleSpec.dll') $false $false))
 }
-if (@($pcsx2).Count -eq 1) { [void]$plan.Add((New-PlanItem 'PCSX2' 'InputProfile' $sources.PCSX2Profile (Join-Path ([string]$pcsx2[0].ProfileDirectory) 'DenGo-Controller-Converter.lily') $false $true)) }
+if (@($pcsx2).Count -eq 1 -and ([string]$pcsx2[0].Mode).IndexOf('LegacyLilyPad',[System.StringComparison]::Ordinal) -ge 0) { [void]$plan.Add((New-PlanItem 'PCSX2' 'InputProfile' $sources.PCSX2Profile (Join-Path ([string]$pcsx2[0].ProfileDirectory) 'DenGo-Controller-Converter.lily') $false $true)) }
 if (@($rpcs3).Count -eq 1) { [void]$plan.Add((New-PlanItem 'RPCS3' 'InputProfile' $sources.RPCS3Profile (Join-Path ([string]$rpcs3[0].ProfileDirectory) 'Den-Go-Controller.yml') $false $true)) }
 
 foreach ($item in @($plan)) {
@@ -616,6 +642,7 @@ $shortcutError = ''
 $succeeded=$true;$errorCode='';$errorMessage='';$failedSet='';$rollbackAttempted=$false;$rollbackSucceeded=$true;$rollbackError=''
 if ($Apply -and $RealSystem) {
     Remove-InstallerTemporaryFiles ([object[]]@($plan))
+    Assert-TargetProcessesStopped
     Write-InstallMarker
     $realApplyResult = Invoke-RealApply ([object[]]@($plan)) $BackupRootOverride
     $applyResults = [object[]]@($realApplyResult.Results)
