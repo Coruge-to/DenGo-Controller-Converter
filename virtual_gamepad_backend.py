@@ -30,14 +30,22 @@ class VirtualGamepadBackend:
             return
         try:
             import vgamepad as vg
-        except ImportError as exc:
-            raise RuntimeError("vgamepad is not installed. Run: python -m pip install vgamepad") from exc
+        except Exception as exc:
+            detail = str(exc).strip()
+            if "VIGEM_ERROR_BUS_NOT_FOUND" in detail:
+                raise RuntimeError("VIGEM_ERROR_BUS_NOT_FOUND: ViGEmBus is not installed or is unavailable.") from exc
+            if isinstance(exc, ImportError):
+                raise RuntimeError("vgamepad is not installed.") from exc
+            raise RuntimeError(f"Failed to import vgamepad: {detail or type(exc).__name__}") from exc
         try:
             pad = vg.VX360Gamepad()
             pad.reset()
             pad.update()
         except Exception as exc:
-            raise RuntimeError("Failed to create a virtual Xbox 360 controller. Verify ViGEmBus.") from exc
+            detail = str(exc).strip()
+            if "VIGEM_ERROR_BUS_NOT_FOUND" in detail:
+                raise RuntimeError("VIGEM_ERROR_BUS_NOT_FOUND: ViGEmBus is not installed or is unavailable.") from exc
+            raise RuntimeError(f"Failed to create a virtual Xbox 360 controller: {detail or type(exc).__name__}") from exc
         self._vg = vg
         self._pad = pad
         self._pressed.clear()

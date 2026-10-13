@@ -14,7 +14,7 @@ a = Analysis(
     binaries=[
         (str(vigem_client_x64), 'vgamepad/win/vigem/client/x64'),
     ],
-    datas=[('DenGo-Controller-Converter.ico', '.')],
+    datas=[('DenGo-Controller-Converter.ico', '.'), ('DenGo-Controller-Converter.png', '.')],
     hiddenimports=['vgamepad'],
     hookspath=[],
     hooksconfig={},

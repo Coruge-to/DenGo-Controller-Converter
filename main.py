@@ -46,6 +46,8 @@ MB_RETRYCANCEL = 0x00000005
 MB_ICONWARNING = 0x00000030
 IDYES = 6
 IDRETRY = 4
+VIGEMBUS_RELEASES_URL = "https://github.com/nefarius/ViGEmBus/releases"
+VIGEMBUS_ACTION_OPEN = 1001
 
 def _check_for_updates_worker(result_queue):
     result = check_latest_release()
@@ -263,13 +265,117 @@ def wait_for_compatible_controller():
             return None
 
 
+def get_pygame_events_safe():
+    try:
+        return pygame.event.get()
+    except (KeyError, SystemError, pygame.error) as exc:
+        print(f"PYGAME_EVENT_GET_RECOVERED={type(exc).__name__}: {exc}", flush=True)
+        try:
+            pygame.event.pump()
+        except (KeyError, SystemError, pygame.error) as pump_exc:
+            print(f"PYGAME_EVENT_PUMP_RECOVERED={type(pump_exc).__name__}: {pump_exc}", flush=True)
+        return ()
+
+class TASKDIALOG_BUTTON(ctypes.Structure):
+    _pack_ = 1
+    _fields_ = [
+        ("nButtonID", ctypes.c_int32),
+        ("pszButtonText", ctypes.c_wchar_p),
+    ]
+
+class TASKDIALOG_MAIN_ICON(ctypes.Union):
+    _fields_ = [
+        ("hMainIcon", ctypes.c_void_p),
+        ("pszMainIcon", ctypes.c_wchar_p),
+    ]
+
+class TASKDIALOG_FOOTER_ICON(ctypes.Union):
+    _fields_ = [
+        ("hFooterIcon", ctypes.c_void_p),
+        ("pszFooterIcon", ctypes.c_wchar_p),
+    ]
+
+class TASKDIALOGCONFIG(ctypes.Structure):
+    _pack_ = 1
+    _anonymous_ = ("mainIcon", "footerIcon")
+    _fields_ = [
+        ("cbSize", ctypes.c_uint32),
+        ("hwndParent", ctypes.c_void_p),
+        ("hInstance", ctypes.c_void_p),
+        ("dwFlags", ctypes.c_uint32),
+        ("dwCommonButtons", ctypes.c_uint32),
+        ("pszWindowTitle", ctypes.c_wchar_p),
+        ("mainIcon", TASKDIALOG_MAIN_ICON),
+        ("pszMainInstruction", ctypes.c_wchar_p),
+        ("pszContent", ctypes.c_wchar_p),
+        ("cButtons", ctypes.c_uint32),
+        ("pButtons", ctypes.POINTER(TASKDIALOG_BUTTON)),
+        ("nDefaultButton", ctypes.c_int32),
+        ("cRadioButtons", ctypes.c_uint32),
+        ("pRadioButtons", ctypes.POINTER(TASKDIALOG_BUTTON)),
+        ("nDefaultRadioButton", ctypes.c_int32),
+        ("pszVerificationText", ctypes.c_wchar_p),
+        ("pszExpandedInformation", ctypes.c_wchar_p),
+        ("pszExpandedControlText", ctypes.c_wchar_p),
+        ("pszCollapsedControlText", ctypes.c_wchar_p),
+        ("footerIcon", TASKDIALOG_FOOTER_ICON),
+        ("pszFooter", ctypes.c_wchar_p),
+        ("pfCallback", ctypes.c_void_p),
+        ("lpCallbackData", ctypes.c_void_p),
+        ("cxWidth", ctypes.c_uint32),
+    ]
+
+def show_virtual_gamepad_unavailable(exc):
+    detail = str(exc)
+    if "VIGEM_ERROR_BUS_NOT_FOUND" in detail:
+        content = (
+            "ViGEmBusをインストールしてWindowsを再起動してください。\n\n"
+            "ViGEmBusが利用可能になるまで、\n"
+            "DenGo Controller Converterは起動できません。"
+        )
+    else:
+        content = (
+            detail
+            + "\n\nViGEmBusが利用可能になるまで、\n"
+            "DenGo Controller Converterは起動できません。"
+        )
+    buttons = (TASKDIALOG_BUTTON * 1)(
+        TASKDIALOG_BUTTON(VIGEMBUS_ACTION_OPEN, "配布ページを開く"),
+    )
+    config = TASKDIALOGCONFIG()
+    config.cbSize = ctypes.sizeof(TASKDIALOGCONFIG)
+    config.dwFlags = 0x00010008
+    config.dwCommonButtons = 0x00000010
+    config.pszWindowTitle = "DenGo Controller Converter"
+    config.pszMainIcon = ctypes.c_wchar_p(ctypes.c_uint16(-1).value)
+    config.pszMainInstruction = "仮想ゲームパッドを開始できませんでした。"
+    config.pszContent = content
+    config.cButtons = len(buttons)
+    config.pButtons = buttons
+    config.nDefaultButton = IDRETRY
+    task_dialog = ctypes.windll.comctl32.TaskDialogIndirect
+    task_dialog.argtypes = [
+        ctypes.POINTER(TASKDIALOGCONFIG),
+        ctypes.POINTER(ctypes.c_int32),
+        ctypes.POINTER(ctypes.c_int32),
+        ctypes.POINTER(ctypes.c_int32),
+    ]
+    task_dialog.restype = ctypes.c_long
+    while True:
+        selected_button = ctypes.c_int32()
+        result = task_dialog(
+            ctypes.byref(config), ctypes.byref(selected_button), None, None
+        )
+        if result != 0:
+            raise ctypes.WinError(result)
+        if selected_button.value == VIGEMBUS_ACTION_OPEN:
+            webbrowser.open(VIGEMBUS_RELEASES_URL)
+            continue
+        return selected_button.value
+
 def main():
     pygame.init()
     pygame.display.set_caption("DenGo Controller Converter")
-    icon_path = resource_path("DenGo-Controller-Converter.ico")
-    if os.path.exists(icon_path):
-        icon = pygame.image.load(icon_path)
-        pygame.display.set_icon(icon)
     
     screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
     pygame.display.set_caption("DenGo Controller Converter")
@@ -308,7 +414,6 @@ def main():
     platform_detector = EfficientPlatformDetector(probe_interval=0.20, full_resync_interval=3.0)
     active_window_route = None
     input_was_enabled = False
-    virtual_gamepad_retry_at = 0.0
     hidhide_configurator = HidHidePcsx2Configurator()
     hidhide_pending_reconnect = False
     last_bve_control_config = None
@@ -349,7 +454,7 @@ def main():
 
     running = True
     while running:
-        for event in pygame.event.get():
+        for event in get_pygame_events_safe():
             if event.type == pygame.QUIT:
                 running = False
             elif event.type == pygame.JOYDEVICEREMOVED:
@@ -445,23 +550,24 @@ def main():
 
         virtual_gamepad_required = can_send_input and game_mode == "PCSX2"
         if virtual_gamepad_required:
-            if not virtual_gamepad_backend.connected:
-                now_monotonic = time.monotonic()
-                if now_monotonic >= virtual_gamepad_retry_at:
-                    try:
+            while running and not virtual_gamepad_backend.connected:
+                try:
+                    virtual_gamepad_backend.connect()
+                    pcsx2_paths = tuple(getattr(single_platform, "executable_paths", ()))
+                    pcsx2_path = pcsx2_paths[0] if len(pcsx2_paths) == 1 else ""
+                    if pcsx2_path and hidhide_configurator.ensure_configured(pcsx2_path):
+                        virtual_gamepad_backend.disconnect()
                         virtual_gamepad_backend.connect()
-                        pcsx2_paths = tuple(getattr(single_platform, "executable_paths", ()))
-                        pcsx2_path = pcsx2_paths[0] if len(pcsx2_paths) == 1 else ""
-                        if pcsx2_path and hidhide_configurator.ensure_configured(pcsx2_path):
-                            virtual_gamepad_backend.disconnect()
-                            virtual_gamepad_backend.connect()
-                    except RuntimeError as exc:
-                        print(f"Virtual gamepad unavailable: {exc}", flush=True)
-                        virtual_gamepad_retry_at = now_monotonic + 1.0
-                if not virtual_gamepad_backend.connected:
-                    can_send_input = False
+                except RuntimeError as exc:
+                    print(f"Virtual gamepad unavailable: {exc}", flush=True)
+                    action = show_virtual_gamepad_unavailable(exc)
+                    if action != IDRETRY:
+                        running = False
+            if not running:
+                break
+            if not virtual_gamepad_backend.connected:
+                can_send_input = False
         else:
-            virtual_gamepad_retry_at = 0.0
             if virtual_gamepad_backend.connected:
                 virtual_gamepad_backend.disconnect()
 
