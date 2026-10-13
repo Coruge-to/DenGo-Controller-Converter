@@ -13,6 +13,7 @@ $engine = Join-Path $root 'scripts\Invoke-DenGoUninstaller.ps1'
 $statePath = Join-Path $env:LOCALAPPDATA 'DenGo Controller Converter\InstallerState\installed-state.json'
 $script:hasPCSX2Profile = $false
 $script:hasRPCS3Profile = $false
+$script:hasBveIntegration = $false
 if ($Preview -and -not [string]::Equals($PreviewProfiles,'Auto',[System.StringComparison]::Ordinal)) {
     $script:hasPCSX2Profile = $PreviewProfiles -in @('Both','PCSX2')
     $script:hasRPCS3Profile = $PreviewProfiles -in @('Both','RPCS3')
@@ -25,21 +26,27 @@ if ($Preview -and -not [string]::Equals($PreviewProfiles,'Auto',[System.StringCo
         })
         $script:hasPCSX2Profile = @($profileItems | Where-Object { [string]::Equals([string]$_.Platform,'PCSX2',[System.StringComparison]::Ordinal) }).Count -gt 0
         $script:hasRPCS3Profile = @($profileItems | Where-Object { [string]::Equals([string]$_.Platform,'RPCS3',[System.StringComparison]::Ordinal) }).Count -gt 0
+        $bveItems = @($installedState.Files | Where-Object {
+            ([string]$_.Platform -in @('BVE5','BVE6','BveEX Current','AtsEX Legacy')) -and
+            [System.IO.File]::Exists([string]$_.Destination)
+        })
+        $script:hasBveIntegration = @($bveItems).Count -gt 0
     } catch {
         $script:hasPCSX2Profile = $false
         $script:hasRPCS3Profile = $false
+        $script:hasBveIntegration = $false
     }
 }
 function Get-ProfilePreservationText {
     param([bool]$Completed)
     if ($script:hasPCSX2Profile -and $script:hasRPCS3Profile) {
-        return $(if ($Completed) { 'PCSX2とRPCS3の入力設定は保持されています' } else { 'PCSX2とRPCS3の入力設定は保持されます' })
+        return $(if ($Completed) { 'PCSX2とRPCS3の各プロファイルは保持されています' } else { 'PCSX2とRPCS3の各プロファイルは保持されます' })
     }
     if ($script:hasPCSX2Profile) {
-        return $(if ($Completed) { 'PCSX2の入力設定は保持されています' } else { 'PCSX2の入力設定は保持されます' })
+        return $(if ($Completed) { 'PCSX2のプロファイルは保持されています' } else { 'PCSX2のプロファイルは保持されます' })
     }
     if ($script:hasRPCS3Profile) {
-        return $(if ($Completed) { 'RPCS3の入力設定は保持されています' } else { 'RPCS3の入力設定は保持されます' })
+        return $(if ($Completed) { 'RPCS3のプロファイルは保持されています' } else { 'RPCS3のプロファイルは保持されます' })
     }
     return ''
 }
@@ -122,7 +129,7 @@ $startTitle.Location = New-Object System.Drawing.Point(42,45)
 $startPage.Controls.Add($startTitle)
 $startText = New-Object System.Windows.Forms.Label
 $startProfileText = Get-ProfilePreservationText $false
-$startText.Text = '本体とBVE連携機能を削除します'
+$startText.Text = if ($script:hasBveIntegration) { '本体とBVE連携機能を削除します' } else { '本体を削除します' }
 if (-not [string]::IsNullOrWhiteSpace($startProfileText)) { $startText.Text += [System.Environment]::NewLine + $startProfileText }
 $startText.Font = New-Object System.Drawing.Font('Yu Gothic UI',10)
 $startText.AutoSize = $true
@@ -140,7 +147,7 @@ $progressTitle.AutoSize = $true
 $progressTitle.Location = New-Object System.Drawing.Point(42,45)
 $progressPage.Controls.Add($progressTitle)
 $progressText = New-Object System.Windows.Forms.Label
-$progressText.Text = 'DenGo本体とBVE連携機能を削除しています'
+$progressText.Text = if ($script:hasBveIntegration) { 'DenGo本体とBVE連携機能を削除しています' } else { 'DenGo本体を削除しています' }
 $progressText.Font = New-Object System.Drawing.Font('Yu Gothic UI',10)
 $progressText.AutoSize = $true
 $progressText.Location = New-Object System.Drawing.Point(45,91)
@@ -176,7 +183,7 @@ $completeTitle.Location = New-Object System.Drawing.Point(42,58)
 $completePage.Controls.Add($completeTitle)
 $completeText = New-Object System.Windows.Forms.Label
 $completeProfileText = Get-ProfilePreservationText $true
-$completeText.Text = '本体とBVE連携機能を削除しました'
+$completeText.Text = if ($script:hasBveIntegration) { '本体とBVE連携機能を削除しました' } else { '本体を削除しました' }
 if (-not [string]::IsNullOrWhiteSpace($completeProfileText)) { $completeText.Text += [System.Environment]::NewLine + $completeProfileText }
 $completeText.Font = New-Object System.Drawing.Font('Yu Gothic UI',10)
 $completeText.AutoSize = $true
