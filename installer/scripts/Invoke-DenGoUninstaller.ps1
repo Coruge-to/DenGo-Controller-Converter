@@ -64,6 +64,7 @@ foreach ($file in @($state.Files)) {
     $beforeSha = [string]$file.BeforeSHA256
     $backup = [string]$file.Backup
     $isProfile = [string]::Equals($component,'InputProfile',[System.StringComparison]::Ordinal)
+    $isEffectiveInputProfile = [string]::Equals($component,'EffectiveInputProfile',[System.StringComparison]::Ordinal)
     $exists = [System.IO.File]::Exists($destination)
     $currentSha = ''
     if ($exists) { $currentSha = Get-Sha256 $destination }
@@ -73,6 +74,20 @@ foreach ($file in @($state.Files)) {
     if ($isProfile -and -not $IncludeInputProfiles) {
         $action = 'KeepProfile'
         $reason = 'Input profiles are preserved by default.'
+    } elseif ($isEffectiveInputProfile) {
+        if (-not $exists) {
+            $action = 'AlreadyMissing'
+            $reason = 'The effective input profile is already absent; it will not be recreated automatically.'
+        } elseif (-not [string]::Equals($currentSha,$afterSha,[System.StringComparison]::Ordinal)) {
+            $action = 'PreserveModified'
+            $reason = 'The effective input profile differs from the installed SHA256 and will be preserved.'
+        } elseif ([string]::Equals($ownership,'ReplacedExisting',[System.StringComparison]::Ordinal) -and -not [string]::IsNullOrWhiteSpace($backup) -and [System.IO.File]::Exists($backup) -and -not [string]::IsNullOrWhiteSpace($beforeSha) -and [string]::Equals((Get-Sha256 $backup),$beforeSha,[System.StringComparison]::Ordinal)) {
+            $action = 'Restore'
+            $reason = 'The original effective input profile backup is valid and will be restored.'
+        } else {
+            $action = 'PreserveModified'
+            $reason = 'Effective input profiles are never removed; the current file will be preserved.'
+        }
     } elseif (-not $exists) {
         if ($ownership -in @('CreatedByInstaller','MigratedMatchingDenGoFile')) {
             $action = 'AlreadyMissing'
@@ -181,6 +196,7 @@ if ($Apply -and $RealSystem) {
                 continue
             }
             if ([string]::Equals($action,'Remove',[System.StringComparison]::Ordinal)) {
+                if ([string]::Equals([string]$item.Component,'EffectiveInputProfile',[System.StringComparison]::Ordinal)) { throw ('EffectiveInputProfile removal is prohibited: ' + $destination) }
                 if (-not [System.IO.File]::Exists($destination)) { throw ('Remove target missing: ' + $destination) }
                 $currentSha = Get-Sha256 $destination
                 if (-not [string]::Equals($currentSha,[string]$item.InstalledSHA256,[System.StringComparison]::Ordinal)) { throw ('Remove SHA256 mismatch: ' + $destination) }

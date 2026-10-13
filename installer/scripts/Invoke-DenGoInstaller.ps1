@@ -408,7 +408,7 @@ function Write-InstalledState {
             }
             if (@($previousItems).Count -eq 1) {
                 $previousOwnership = [string]$previousItems[0].Ownership
-                if ([string]::Equals($previousOwnership,'ReplacedExisting',[System.StringComparison]::Ordinal) -and -not [string]::Equals([string]$item.Component,'InputProfile',[System.StringComparison]::Ordinal)) {
+                if ([string]::Equals($previousOwnership,'ReplacedExisting',[System.StringComparison]::Ordinal) -and -not ([string]::Equals([string]$item.Component,'InputProfile',[System.StringComparison]::Ordinal) -or [string]::Equals([string]$item.Component,'EffectiveInputProfile',[System.StringComparison]::Ordinal))) {
                     $ownership = 'MigratedMatchingDenGoFile'
                     $existedBefore = $false
                     $beforeSha = ''
@@ -419,7 +419,7 @@ function Write-InstalledState {
                     $beforeSha = [string]$previousItems[0].BeforeSHA256
                     $backup = [string]$previousItems[0].Backup
                 }
-            } elseif ([string]::Equals([string]$item.Component,'InputProfile',[System.StringComparison]::Ordinal)) {
+            } elseif ([string]::Equals([string]$item.Component,'InputProfile',[System.StringComparison]::Ordinal) -or [string]::Equals([string]$item.Component,'EffectiveInputProfile',[System.StringComparison]::Ordinal)) {
                 $ownership = 'ReplacedExisting'
                 $existedBefore = -not [string]::IsNullOrWhiteSpace($backup)
                 if ($existedBefore -and [System.IO.File]::Exists($backup)) { $beforeSha = Get-Sha256 $backup }
@@ -436,7 +436,7 @@ function Write-InstalledState {
             }
             if (@($previousItems).Count -eq 1) {
                 $previousOwnership = [string]$previousItems[0].Ownership
-                if ([string]::Equals($previousOwnership,'ReplacedExisting',[System.StringComparison]::Ordinal) -and -not [string]::Equals([string]$item.Component,'InputProfile',[System.StringComparison]::Ordinal)) {
+                if ([string]::Equals($previousOwnership,'ReplacedExisting',[System.StringComparison]::Ordinal) -and -not ([string]::Equals([string]$item.Component,'InputProfile',[System.StringComparison]::Ordinal) -or [string]::Equals([string]$item.Component,'EffectiveInputProfile',[System.StringComparison]::Ordinal))) {
                     $ownership = 'MigratedMatchingDenGoFile'
                     $existedBefore = $false
                     $beforeSha = ''
