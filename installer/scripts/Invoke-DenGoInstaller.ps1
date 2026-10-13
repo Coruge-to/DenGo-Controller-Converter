@@ -5,6 +5,7 @@
     [switch]$RealSystem,
     [string]$ConfirmRealApply = '',
     [switch]$AdditionalSearch,
+    [switch]$SkipBveIntegration,
     [switch]$ReplaceModifiedPCSX2Profile,
     [switch]$ReplaceModifiedRPCS3Profile,
     [string]$OutputRoot = '',
@@ -752,16 +753,20 @@ $rpcs3 = @($detected | Where-Object { [string]::Equals([string]$_.Platform,'RPCS
 $plan = New-Object System.Collections.ArrayList
 [void]$plan.Add((New-PlanItem 'Core' 'Application' $sources.Application (Join-Path $env:LOCALAPPDATA 'Programs\DenGo Controller Converter\DenGoControllerConverter.exe') $true $false))
 [void]$plan.Add((New-PlanItem 'Core' 'Icon' $sources.Icon (Join-Path $env:LOCALAPPDATA 'Programs\DenGo Controller Converter\DenGo-Controller-Converter.ico') $true $false))
-foreach ($item in $bve) { [void]$plan.Add((New-PlanItem ([string]$item.Mode) 'Caller' $sources.Caller (Join-Path ([string]$item.InputDevices) 'DenGoControllerConverter.dll') $true $false)) }
 $currentDir='C:\Users\Public\Documents\BveEx\2.0\Extensions'
-if ([System.IO.Directory]::Exists($currentDir)) {
-    [void]$plan.Add((New-PlanItem 'BveEX Current' 'Bridge' $sources.CurrentBridge (Join-Path $currentDir 'DenGoVehicleSpec.BveEx.Bridge.dll') $false $false))
-    [void]$plan.Add((New-PlanItem 'BveEX Current' 'VehicleSpec' $sources.CurrentVehicleSpec (Join-Path $currentDir 'DenGoBveVehicleSpec.dll') $false $false))
-}
-$legacyDir='C:\Users\Public\Documents\AtsEx\1.0\Extensions'
-if ([System.IO.Directory]::Exists($legacyDir)) {
-    [void]$plan.Add((New-PlanItem 'AtsEX Legacy' 'Bridge' $sources.LegacyBridge (Join-Path $legacyDir 'DenGoVehicleSpec.AtsExLegacy.Bridge.dll') $false $false))
-    [void]$plan.Add((New-PlanItem 'AtsEX Legacy' 'VehicleSpec' $sources.LegacyVehicleSpec (Join-Path $legacyDir 'DenGoAtsExLegacyVehicleSpec.dll') $false $false))
+$legacyDir='C:\Users\Public\Documents\BveEx\Legacy\Extensions'
+$bveExCurrentInstalled = [System.IO.Directory]::Exists($currentDir)
+$bveExLegacyInstalled = [System.IO.Directory]::Exists($legacyDir)
+if (-not [bool]$SkipBveIntegration) {
+    foreach ($item in $bve) { [void]$plan.Add((New-PlanItem ([string]$item.Mode) 'Caller' $sources.Caller (Join-Path ([string]$item.InputDevices) 'DenGoControllerConverter.dll') $true $false)) }
+    if (@($bve).Count -gt 0 -and $bveExCurrentInstalled) {
+        [void]$plan.Add((New-PlanItem 'BveEX Current' 'Bridge' $sources.CurrentBridge (Join-Path $currentDir 'DenGoVehicleSpec.BveEx.Bridge.dll') $false $false))
+        [void]$plan.Add((New-PlanItem 'BveEX Current' 'VehicleSpec' $sources.CurrentVehicleSpec (Join-Path $currentDir 'DenGoBveVehicleSpec.dll') $false $false))
+    }
+    if (@($bve).Count -gt 0 -and $bveExLegacyInstalled) {
+        [void]$plan.Add((New-PlanItem 'AtsEX Legacy' 'Bridge' $sources.LegacyBridge (Join-Path $legacyDir 'DenGoVehicleSpec.AtsExLegacy.Bridge.dll') $false $false))
+        [void]$plan.Add((New-PlanItem 'AtsEX Legacy' 'VehicleSpec' $sources.LegacyVehicleSpec (Join-Path $legacyDir 'DenGoAtsExLegacyVehicleSpec.dll') $false $false))
+    }
 }
 if (@($supportedPcsx2).Count -eq 1) {
     [void]$plan.Add((New-PlanItem 'PCSX2' 'InputProfile' $sources.PCSX2Profile (Join-Path ([string]$supportedPcsx2[0].ProfileDirectory) 'DenGo-Controller-Converter.lily') $false $true))
@@ -816,7 +821,7 @@ if ($Apply -and $RealSystem) {
 } elseif ($Apply) {
     $applyResults = Invoke-SandboxApply ([object[]]@($plan)) $TestRoot
 }
-$result=[pscustomobject]@{SchemaVersion=8;Generated=[System.DateTimeOffset]::Now.ToString('o');InterruptedInstallDetected=$interruptedInstallDetected;Succeeded=$succeeded;ErrorCode=$errorCode;ErrorMessage=$errorMessage;FailedSet=$failedSet;RollbackAttempted=$rollbackAttempted;RollbackSucceeded=$rollbackSucceeded;RollbackError=$rollbackError;ShortcutRequested=$shortcutRequested;ShortcutCreated=$shortcutCreated;ShortcutPath=$shortcutPath;ShortcutError=$shortcutError;DryRun=[bool]$DryRun;Apply=[bool]$Apply;RealSystem=[bool]$RealSystem;AdditionalSearch=[bool]$AdditionalSearch;TestRoot=$TestRoot;OutputRoot=$outputRoot;BackupRoot=$backupRoot;ReplacementDecisions=[pscustomobject]@{PCSX2=[bool]$ReplaceModifiedPCSX2Profile;RPCS3=[bool]$ReplaceModifiedRPCS3Profile};Detected=[object[]]@($detected);Plan=[object[]]@($plan);ApplyResults=[object[]]@($applyResults)}
+$result=[pscustomobject]@{SchemaVersion=9;Generated=[System.DateTimeOffset]::Now.ToString('o');InterruptedInstallDetected=$interruptedInstallDetected;Succeeded=$succeeded;ErrorCode=$errorCode;ErrorMessage=$errorMessage;FailedSet=$failedSet;RollbackAttempted=$rollbackAttempted;RollbackSucceeded=$rollbackSucceeded;RollbackError=$rollbackError;ShortcutRequested=$shortcutRequested;ShortcutCreated=$shortcutCreated;ShortcutPath=$shortcutPath;ShortcutError=$shortcutError;DryRun=[bool]$DryRun;Apply=[bool]$Apply;RealSystem=[bool]$RealSystem;AdditionalSearch=[bool]$AdditionalSearch;BveExCurrentInstalled=[bool]$bveExCurrentInstalled;BveExLegacyInstalled=[bool]$bveExLegacyInstalled;BveIntegrationSkipped=[bool]$SkipBveIntegration;TestRoot=$TestRoot;OutputRoot=$outputRoot;BackupRoot=$backupRoot;ReplacementDecisions=[pscustomobject]@{PCSX2=[bool]$ReplaceModifiedPCSX2Profile;RPCS3=[bool]$ReplaceModifiedRPCS3Profile};Detected=[object[]]@($detected);Plan=[object[]]@($plan);ApplyResults=[object[]]@($applyResults)}
 [System.IO.File]::WriteAllText($jsonOutput,($result | ConvertTo-Json -Depth 9),(New-Object System.Text.UTF8Encoding($true)))
 $lines=New-Object System.Collections.ArrayList
 [void]$lines.Add('DenGo installer formal preview plan')

@@ -62,6 +62,22 @@ try {
       Add-TestResult 'GUI-PCSX2-02' 'Download and skip actions exist' ($openText -ge 0 -and $skipText -ge 0 -and $legacyUrl -ge 0) (("Open={0};Skip={1};Url={2}" -f $openText,$skipText,$legacyUrl))
       $unsupportedPreview = Get-IndexOrdinal $gui "PCSX2Unsupported"
       Add-TestResult 'GUI-PCSX2-03' 'Unsupported PCSX2 preview exists' ($unsupportedPreview -ge 0) ('Index=' + [string]$unsupportedPreview)
+      $normalUnsupportedCall = Get-IndexOrdinal $gui 'if(-not$script:unsupportedPCSX2Shown-and(Has-UnsupportedCurrentPCSX2))'
+      Add-TestResult 'GUI-PCSX2-04' 'Unsupported PCSX2 dialog is connected to normal detection flow' ($normalUnsupportedCall -ge 0) ('Index=' + [string]$normalUnsupportedCall)
+      $bveMissingMessage1 = Get-IndexOrdinal $gui 'BveEXが見つかりません'
+      $bveMissingMessage2 = Get-IndexOrdinal $gui 'BveEXを導入してからセットアップを再実行するか、'
+      $bveMissingMessage3 = Get-IndexOrdinal $gui '設定をスキップしてください'
+      $bveDownloadUrl = Get-IndexOrdinal $gui 'https://bveex.okaoka-depot.com/download'
+      $bveMissingPreview = Get-IndexOrdinal $gui 'BveEXMissing'
+      Add-TestResult 'GUI-BVEEX-01' 'Missing BveEX message is exact' ($bveMissingMessage1 -ge 0 -and $bveMissingMessage2 -ge 0 -and $bveMissingMessage3 -ge 0) (("Line1={0};Line2={1};Line3={2}" -f $bveMissingMessage1,$bveMissingMessage2,$bveMissingMessage3))
+      Add-TestResult 'GUI-BVEEX-02' 'BveEX distribution and skip actions exist' ($bveDownloadUrl -ge 0 -and $openText -ge 0 -and $skipText -ge 0) (("Url={0};Open={1};Skip={2}" -f $bveDownloadUrl,$openText,$skipText))
+      Add-TestResult 'GUI-BVEEX-03' 'Missing BveEX preview exists' ($bveMissingPreview -ge 0) ('Index=' + [string]$bveMissingPreview)
+      $skipSwitch = Get-IndexOrdinal $engine '[switch]$SkipBveIntegration'
+      $currentFlag = Get-IndexOrdinal $engine 'BveExCurrentInstalled=[bool]$bveExCurrentInstalled'
+      $correctLegacy = Get-IndexOrdinal $engine "C:\Users\Public\Documents\BveEx\Legacy\Extensions"
+      $wrongLegacy = Get-IndexOrdinal $engine "C:\Users\Public\Documents\AtsEx\1.0\Extensions"
+      Add-TestResult 'ENGINE-BVEEX-01' 'BVE integration can be skipped explicitly' ($skipSwitch -ge 0 -and $currentFlag -ge 0) (("Switch={0};Flag={1}" -f $skipSwitch,$currentFlag))
+      Add-TestResult 'ENGINE-BVEEX-02' 'Legacy path is correct and old path is absent' ($correctLegacy -ge 0 -and $wrongLegacy -lt 0) (("Correct={0};Wrong={1}" -f $correctLegacy,$wrongLegacy))
     $assertIndex = Get-IndexOrdinal $engine 'Assert-TargetProcessesStopped'
     $markerCallIndex = Get-IndexOrdinal $engine '    Write-InstallMarker'
     Add-TestResult 'PROC-01' 'Process gate precedes install marker' ($assertIndex -ge 0 -and $markerCallIndex -ge 0 -and $assertIndex -lt $markerCallIndex) (("Assert={0};Marker={1}" -f $assertIndex,$markerCallIndex))

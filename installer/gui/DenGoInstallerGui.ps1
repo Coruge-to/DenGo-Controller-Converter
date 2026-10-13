@@ -1,5 +1,5 @@
 ﻿param(
-    [ValidateSet('Normal','Symbols','PCSX2Conflict','RPCS3Conflict','BothConflicts','PCSX2Unsupported')]
+    [ValidateSet('Normal','Symbols','PCSX2Conflict','RPCS3Conflict','BothConflicts','PCSX2Unsupported','BveEXMissing')]
     [string]$Preview = 'Normal'
 )
 $ErrorActionPreference = 'Stop'
@@ -23,6 +23,8 @@ $script:conflicts = @()
 $script:conflictIndex = 0
 $script:decisions = @{}
 $script:unsupportedPCSX2Shown = $false
+$script:missingBveEXShown = $false
+$script:bveIntegrationSkipped = $false
 $script:barX = 1
 $script:barStep = 7
 
@@ -181,6 +183,13 @@ function Set-Page([string]$Name) {
 }
 function Has-Detected([string]$Platform,[string]$Mode) {return @($script:plan.Detected|Where-Object{$_.Platform -eq $Platform -and ($Mode -eq '' -or $_.Mode -eq $Mode)-and $_.State -eq 'Detected'}).Count-gt 0}
 function Has-Conflict([string]$Platform){return @($script:plan.Plan|Where-Object{$_.Platform -eq $Platform -and $_.Action -eq 'PreserveUserModified'}).Count-gt 0}
+function Has-DetectedBveWithoutBveEX {
+    $hasBve = @($script:plan.Detected | Where-Object {
+        [string]::Equals([string]$_.Platform,'BVE',[System.StringComparison]::Ordinal) -and
+        [string]::Equals([string]$_.State,'Detected',[System.StringComparison]::Ordinal)
+    }).Count -gt 0
+    return $hasBve -and -not [bool]$script:plan.BveExCurrentInstalled
+}
 function Has-UnsupportedCurrentPCSX2 {
     return @($script:plan.Detected | Where-Object {
         [string]::Equals([string]$_.Platform,'PCSX2',[System.StringComparison]::Ordinal) -and
@@ -264,6 +273,82 @@ public static class NativeTaskDialogV3 {
         }
     }
 }
+function Show-MissingBveEXDialog {
+    if (-not ('DenGo.NativeTaskDialogV3' -as [type])) {
+        [void](Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+namespace DenGo {
+[StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode, Pack=4)] public struct TASKDIALOG_BUTTON_V3 { public int nButtonID; [MarshalAs(UnmanagedType.LPWStr)] public string pszButtonText; }
+[StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode, Pack=4)] public struct TASKDIALOGCONFIG_V3 { public uint cbSize; public IntPtr hwndParent; public IntPtr hInstance; public uint dwFlags; public uint dwCommonButtons; [MarshalAs(UnmanagedType.LPWStr)] public string pszWindowTitle; public IntPtr mainIcon; [MarshalAs(UnmanagedType.LPWStr)] public string pszMainInstruction; [MarshalAs(UnmanagedType.LPWStr)] public string pszContent; public uint cButtons; public IntPtr pButtons; public int nDefaultButton; public uint cRadioButtons; public IntPtr pRadioButtons; public int nDefaultRadioButton; public IntPtr pszVerificationText; public IntPtr pszExpandedInformation; public IntPtr pszExpandedControlText; public IntPtr pszCollapsedControlText; public IntPtr footerIcon; public IntPtr pszFooter; public IntPtr pfCallback; public IntPtr lpCallbackData; public uint cxWidth; }
+[StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)] public struct ACTCTX_V3 { public uint cbSize; public uint dwFlags; [MarshalAs(UnmanagedType.LPWStr)] public string lpSource; public ushort wProcessorArchitecture; public ushort wLangId; public string lpAssemblyDirectory; public string lpResourceName; public string lpApplicationName; public IntPtr hModule; }
+public static class NativeTaskDialogV3 {
+[DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] public static extern IntPtr CreateActCtxW(ref ACTCTX_V3 actctx);
+[DllImport("kernel32.dll", SetLastError=true)] [return: MarshalAs(UnmanagedType.Bool)] public static extern bool ActivateActCtx(IntPtr hActCtx, out UIntPtr cookie);
+[DllImport("kernel32.dll", SetLastError=true)] [return: MarshalAs(UnmanagedType.Bool)] public static extern bool DeactivateActCtx(uint flags, UIntPtr cookie);
+[DllImport("kernel32.dll")] public static extern void ReleaseActCtx(IntPtr hActCtx);
+[DllImport("comctl32.dll", CharSet=CharSet.Unicode, PreserveSig=true)] public static extern int TaskDialogIndirect(ref TASKDIALOGCONFIG_V3 config, out int button, out int radio, out bool verification);
+}
+}
+'@ -Language CSharp)
+    }
+    $openId=1101
+    $skipId=1102
+    $buttonSize=[System.Runtime.InteropServices.Marshal]::SizeOf([type][DenGo.TASKDIALOG_BUTTON_V3])
+    $memory=[System.Runtime.InteropServices.Marshal]::AllocHGlobal($buttonSize*2)
+    $manifestPath=Join-Path $env:TEMP ('DenGo-CommonControls-v6-'+[System.Guid]::NewGuid().ToString('N')+'.manifest')
+    $actCtxHandle=[IntPtr]::Zero
+    $cookie=[UIntPtr]::Zero
+    $activated=$false
+    try {
+        $open=New-Object DenGo.TASKDIALOG_BUTTON_V3
+        $open.nButtonID=$openId
+        $open.pszButtonText='配布ページを開く'
+        $skip=New-Object DenGo.TASKDIALOG_BUTTON_V3
+        $skip.nButtonID=$skipId
+        $skip.pszButtonText='設定をスキップ'
+        [System.Runtime.InteropServices.Marshal]::StructureToPtr($open,$memory,$false)
+        $second=[IntPtr]::Add($memory,$buttonSize)
+        [System.Runtime.InteropServices.Marshal]::StructureToPtr($skip,$second,$false)
+        $manifest='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0"><dependency><dependentAssembly><assemblyIdentity type="win32" name="Microsoft.Windows.Common-Controls" version="6.0.0.0" processorArchitecture="*" publicKeyToken="6595b64144ccf1df" language="*" /></dependentAssembly></dependency></assembly>'
+        [System.IO.File]::WriteAllText($manifestPath,$manifest,(New-Object System.Text.UTF8Encoding($false)))
+        $actCtx=New-Object DenGo.ACTCTX_V3
+        $actCtx.cbSize=[System.Runtime.InteropServices.Marshal]::SizeOf([type][DenGo.ACTCTX_V3])
+        $actCtx.lpSource=$manifestPath
+        $actCtxHandle=[DenGo.NativeTaskDialogV3]::CreateActCtxW([ref]$actCtx)
+        if($actCtxHandle-eq(New-Object IntPtr(-1))){throw('CreateActCtxW failed. Win32Error={0}' -f [System.Runtime.InteropServices.Marshal]::GetLastWin32Error())}
+        $activated=[DenGo.NativeTaskDialogV3]::ActivateActCtx($actCtxHandle,[ref]$cookie)
+        if(-not$activated){throw('ActivateActCtx failed. Win32Error={0}' -f [System.Runtime.InteropServices.Marshal]::GetLastWin32Error())}
+        $config=New-Object DenGo.TASKDIALOGCONFIG_V3
+        $config.cbSize=[System.Runtime.InteropServices.Marshal]::SizeOf([type][DenGo.TASKDIALOGCONFIG_V3])
+        $config.hwndParent=$form.Handle
+        $config.dwFlags=0x00000008
+        $config.pszWindowTitle='DenGo Controller Converter セットアップ'
+        $config.pszMainInstruction='BveEXが見つかりません'
+        $config.pszContent="BveEXを導入してからセットアップを再実行するか、`r`n設定をスキップしてください"
+        $config.cButtons=2
+        $config.pButtons=$memory
+        $config.nDefaultButton=$skipId
+        while($true){
+            $selected=0
+            $radio=0
+            $verification=$false
+            $hr=[DenGo.NativeTaskDialogV3]::TaskDialogIndirect([ref]$config,[ref]$selected,[ref]$radio,[ref]$verification)
+            if($hr-ne0){throw('TaskDialogIndirect failed. HRESULT={0}' -f $hr)}
+            if($selected-eq$openId){Start-Process -FilePath 'https://bveex.okaoka-depot.com/download'|Out-Null;continue}
+            return
+        }
+    } finally {
+        if($activated){[void][DenGo.NativeTaskDialogV3]::DeactivateActCtx(0,$cookie)}
+        if($actCtxHandle-ne[IntPtr]::Zero-and$actCtxHandle-ne(New-Object IntPtr(-1))){[DenGo.NativeTaskDialogV3]::ReleaseActCtx($actCtxHandle)}
+        Remove-Item -LiteralPath $manifestPath -Force -ErrorAction SilentlyContinue
+        if($memory-ne[IntPtr]::Zero){
+            [System.Runtime.InteropServices.Marshal]::DestroyStructure($memory,[type][DenGo.TASKDIALOG_BUTTON_V3])
+            [System.Runtime.InteropServices.Marshal]::DestroyStructure([IntPtr]::Add($memory,$buttonSize),[type][DenGo.TASKDIALOG_BUTTON_V3])
+            [System.Runtime.InteropServices.Marshal]::FreeHGlobal($memory)
+        }
+    }
+}
 function Show-Conflict {if($script:conflictIndex -ge @($script:conflicts).Count){Start-SandboxApply;return};$name=[string]$script:conflicts[$script:conflictIndex];$conflictTitle.Text=$name+'の入力設定を確認';if([string]::Equals($name,'PCSX2',[System.StringComparison]::Ordinal)){$conflictText.Text="既存の入力設定が見つかりました`r`n既存の入力設定を置き換えますか？";$conflictNote.Text="※仮想ゲームパッドの設定が欠落・破損している場合、コンバータは動作しません"}else{$conflictText.Text="既存の入力設定ファイルが見つかりました`r`n標準設定で置き換えますか？";$conflictNote.Text="「はい」を選ぶと、現在の設定ファイルをバックアップしてから置き換えます"};Set-Page 'conflict'}
 function Resolve-Conflict([string]$Choice){$name=[string]$script:conflicts[$script:conflictIndex];$script:decisions[$name]=$Choice;$script:conflictIndex++;Show-Conflict}
 function Add-Row([int]$Row,[string]$Kind,[string]$Software,[string]$State){$table.Controls.Add((New-StatusSymbol $Kind),0,$Row);$table.Controls.Add((New-Cell $Software 'MiddleLeft' $false),1,$Row);$table.Controls.Add((New-Cell $State 'MiddleLeft' $false),2,$Row)}
@@ -271,7 +356,7 @@ function Get-ApplyResult([string]$Platform,[string]$Component){return @($script:
 function Show-Results {
     for($i=$table.Controls.Count-1;$i-ge 3;$i--){$table.Controls.RemoveAt($i)}
     $core=Get-ApplyResult 'Core' 'Application';if(@($core).Count-eq1){if(Has-Detected 'Steam' 'JRETS'){Add-Row 1 'ok' 'JRETS' '利用可能'}else{Add-Row 1 'none' 'JRETS' '見つかりませんでした'};if(Has-Detected 'Steam' 'RUNNINGTRAIN'){Add-Row 2 'ok' 'RUNNING TRAIN' '利用可能'}else{Add-Row 2 'none' 'RUNNING TRAIN' '見つかりませんでした'}}else{Add-Row 1 'fail' 'JRETS' '本体の導入に失敗しました';Add-Row 2 'fail' 'RUNNING TRAIN' '本体の導入に失敗しました'}
-    foreach($entry in @(@('BVE5',3,'BVE Trainsim 5'),@('BVE6',4,'BVE Trainsim 6'))){$p=$entry[0];$r=[int]$entry[1];$n=$entry[2];$a=Get-ApplyResult $p 'Caller';if(@($a).Count-eq1){Add-Row $r 'ok' $n '連携済み・利用可能'}elseif(Has-Detected 'BVE' $p){Add-Row $r 'fail' $n '連携機能の導入に失敗しました'}else{Add-Row $r 'none' $n '見つかりませんでした'}}
+    foreach($entry in @(@('BVE5',3,'BVE Trainsim 5'),@('BVE6',4,'BVE Trainsim 6'))){$p=$entry[0];$r=[int]$entry[1];$n=$entry[2];$a=Get-ApplyResult $p 'Caller';if([bool]$script:bveIntegrationSkipped-and(Has-Detected 'BVE' $p)){Add-Row $r 'warn' $n '設定をスキップしました'}elseif(@($a).Count-eq1){Add-Row $r 'ok' $n '連携済み・利用可能'}elseif(Has-Detected 'BVE' $p){Add-Row $r 'fail' $n '連携機能の導入に失敗しました'}else{Add-Row $r 'none' $n '見つかりませんでした'}}
     $pcsx2Apply=Get-ApplyResult 'PCSX2' 'InputProfile';if(-not(Has-Detected 'PCSX2' '')){Add-Row 5 'none' 'PCSX2' '見つかりませんでした'}elseif(Has-UnsupportedCurrentPCSX2 -and @($pcsx2Apply).Count-eq0){Add-Row 5 'warn' 'PCSX2' 'ver1.7以降・非対応'}elseif(@($pcsx2Apply|Where-Object{$_.Action-eq'PreserveUserModified'}).Count-eq1){Add-Row 5 'warn' 'PCSX2' '既存の設定を使用します'}elseif(@($pcsx2Apply).Count-eq1){Add-Row 5 'ok' 'PCSX2' '設定済み・利用可能'}else{Add-Row 5 'fail' 'PCSX2' '入力設定の追加に失敗しました'}
     $rpcs3Apply=Get-ApplyResult 'RPCS3' 'InputProfile';if(-not(Has-Detected 'RPCS3' '')){Add-Row 6 'none' 'RPCS3' '見つかりませんでした'}elseif(@($rpcs3Apply|Where-Object{$_.Action-eq'PreserveUserModified'}).Count-eq1){Add-Row 6 'warn' 'RPCS3' '既存の設定を使用します'}elseif(@($rpcs3Apply).Count-eq1){Add-Row 6 'ok' 'RPCS3' '設定済み・利用可能'}else{Add-Row 6 'fail' 'RPCS3' '入力設定の追加に失敗しました'}
     Set-Page 'result'
@@ -304,6 +389,13 @@ function Start-UnsupportedPCSX2Preview {
     $script:plan=[pscustomobject]@{Detected=[object[]]@([pscustomobject]@{Platform='PCSX2';Mode='CentralConfiguration-CurrentIntegrated';State='Detected'});Plan=[object[]]@()}
     $script:unsupportedPCSX2Shown=$true
     Show-UnsupportedPCSX2Dialog
+    Show-SymbolPreview
+}
+function Start-MissingBveEXPreview {
+    $script:plan=[pscustomobject]@{Detected=[object[]]@([pscustomobject]@{Platform='BVE';Mode='BVE6';State='Detected'});Plan=[object[]]@();BveExCurrentInstalled=$false}
+    $script:missingBveEXShown=$true
+    $script:bveIntegrationSkipped=$true
+    Show-MissingBveEXDialog
     Show-SymbolPreview
 }
 function Join-NativeArguments {
@@ -390,6 +482,7 @@ function Start-SandboxApply {
     $script:operation='real-apply'
     $args=@('-NoProfile','-ExecutionPolicy','Bypass','-File',$engine,'-Apply','-RealSystem','-ConfirmRealApply','INSTALL','-OutputRoot',$applyOutput)
     if([bool]$shortcut.Tag.Checked){$args+='-CreateDesktopShortcut'}
+    if([bool]$script:bveIntegrationSkipped){$args+='-SkipBveIntegration'}
     if($script:decisions.ContainsKey('PCSX2')-and$script:decisions['PCSX2']-eq'replace'){$args+='-ReplaceModifiedPCSX2Profile'}
     if($script:decisions.ContainsKey('RPCS3')-and$script:decisions['RPCS3']-eq'replace'){$args+='-ReplaceModifiedRPCS3Profile'}
     [System.IO.Directory]::CreateDirectory($applyOutput) | Out-Null
@@ -409,7 +502,7 @@ function Confirm-SetupCancel {
     $answer=[System.Windows.Forms.MessageBox]::Show('セットアップを中止しますか？','DenGo Controller Converter セットアップ',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Question)
     return $answer -eq [System.Windows.Forms.DialogResult]::Yes
 }
-$timer.Add_Tick({$limit=$track.ClientSize.Width-$block.Width-2;$script:barX+=$script:barStep;if($script:barX-ge$limit){$script:barX=$limit;$script:barStep=-7};if($script:barX-le1){$script:barX=1;$script:barStep=7};$block.Left=$script:barX;if($null-eq$script:process-or-not$script:process.HasExited){return};$timer.Stop();$code=$script:process.ExitCode;$script:process.Dispose();$script:process=$null;if(-not[System.IO.File]::Exists($script:planPath)){[System.Windows.Forms.MessageBox]::Show(('処理結果を確認できませんでした。 終了コード: '+$code),'DenGo セットアップ')|Out-Null;Set-Page 'welcome';return};$script:plan=[System.IO.File]::ReadAllText($script:planPath,[System.Text.Encoding]::UTF8)|ConvertFrom-Json;if(-not[bool]$script:plan.Succeeded){$detail=[string]$script:plan.ErrorMessage;if([string]::IsNullOrWhiteSpace($detail)){$detail='処理に失敗しました'};[System.Windows.Forms.MessageBox]::Show($detail,'DenGo セットアップ')|Out-Null;Set-Page 'welcome';return};if($script:operation-eq'real-apply'){$script:operation='idle';$script:lastResultAvailable=$true;Show-Results;return};if(-not$script:unsupportedPCSX2Shown-and(Has-UnsupportedCurrentPCSX2)){$script:unsupportedPCSX2Shown=$true;Show-UnsupportedPCSX2Dialog};$script:conflicts=@();foreach($n in @('PCSX2','RPCS3')){if(Has-Conflict $n){$script:conflicts+=$n}};$script:conflictIndex=0;$script:decisions=@{};if(@($script:conflicts).Count-eq0){Start-SandboxApply}else{Show-Conflict}})
+$timer.Add_Tick({$limit=$track.ClientSize.Width-$block.Width-2;$script:barX+=$script:barStep;if($script:barX-ge$limit){$script:barX=$limit;$script:barStep=-7};if($script:barX-le1){$script:barX=1;$script:barStep=7};$block.Left=$script:barX;if($null-eq$script:process-or-not$script:process.HasExited){return};$timer.Stop();$code=$script:process.ExitCode;$script:process.Dispose();$script:process=$null;if(-not[System.IO.File]::Exists($script:planPath)){[System.Windows.Forms.MessageBox]::Show(('処理結果を確認できませんでした。 終了コード: '+$code),'DenGo セットアップ')|Out-Null;Set-Page 'welcome';return};$script:plan=[System.IO.File]::ReadAllText($script:planPath,[System.Text.Encoding]::UTF8)|ConvertFrom-Json;if(-not[bool]$script:plan.Succeeded){$detail=[string]$script:plan.ErrorMessage;if([string]::IsNullOrWhiteSpace($detail)){$detail='処理に失敗しました'};[System.Windows.Forms.MessageBox]::Show($detail,'DenGo セットアップ')|Out-Null;Set-Page 'welcome';return};if($script:operation-eq'real-apply'){$script:operation='idle';$script:lastResultAvailable=$true;Show-Results;return};if(-not$script:missingBveEXShown-and(Has-DetectedBveWithoutBveEX)){$script:missingBveEXShown=$true;$script:bveIntegrationSkipped=$true;Show-MissingBveEXDialog};if(-not$script:unsupportedPCSX2Shown-and(Has-UnsupportedCurrentPCSX2)){$script:unsupportedPCSX2Shown=$true;Show-UnsupportedPCSX2Dialog};$script:conflicts=@();foreach($n in @('PCSX2','RPCS3')){if(Has-Conflict $n){$script:conflicts+=$n}};$script:conflictIndex=0;$script:decisions=@{};if(@($script:conflicts).Count-eq0){Start-SandboxApply}else{Show-Conflict}})
 $next.Add_Click({if(-not(Confirm-RunningProductsClosed)){if(Confirm-SetupCancel){$script:allowClose=$true;$form.Close()};return};Start-Detection $false})
 $search.Add_Click({Start-Detection $true})
 $cancel.Add_Click({
@@ -457,5 +550,6 @@ elseif($Preview -eq 'PCSX2Conflict'){Start-ConflictPreview @('PCSX2')}
 elseif($Preview -eq 'RPCS3Conflict'){Start-ConflictPreview @('RPCS3')}
 elseif($Preview -eq 'BothConflicts'){Start-ConflictPreview @('PCSX2','RPCS3')}
 elseif($Preview -eq 'PCSX2Unsupported'){Start-UnsupportedPCSX2Preview}
+elseif($Preview -eq 'BveEXMissing'){Start-MissingBveEXPreview}
 else{Set-Page 'welcome'}
 [void]$form.ShowDialog()
