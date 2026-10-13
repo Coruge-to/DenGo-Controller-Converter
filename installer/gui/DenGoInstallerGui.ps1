@@ -314,6 +314,26 @@ function Join-NativeArguments {
 }
 
 $timer=New-Object System.Windows.Forms.Timer;$timer.Interval=35
+function Read-TextFileShared {
+    param([string]$Path)
+    if (-not [System.IO.File]::Exists($Path)) { return '' }
+    for ($attempt=0; $attempt -lt 10; $attempt++) {
+        $stream=$null
+        $reader=$null
+        try {
+            $stream=New-Object System.IO.FileStream($Path,[System.IO.FileMode]::Open,[System.IO.FileAccess]::Read,[System.IO.FileShare]::ReadWrite)
+            $reader=New-Object System.IO.StreamReader($stream,[System.Text.Encoding]::Default,$true)
+            return $reader.ReadToEnd().Trim()
+        } catch [System.IO.IOException] {
+            if ($attempt -eq 9) { return '' }
+            Start-Sleep -Milliseconds 50
+        } finally {
+            if ($null -ne $reader) { $reader.Dispose() }
+            elseif ($null -ne $stream) { $stream.Dispose() }
+        }
+    }
+    return ''
+}
 function Start-Detection([bool]$Additional){$script:operation=if($Additional){'additional-search'}else{'dryrun'};Set-Page 'progress';$progressText.Text=if($Additional){'追加の環境を検索しています'}else{'対応ソフトを検出しています'};$progressHint.Text=if($Additional){'検索には時間がかかる場合があります'}else{'しばらくお待ちください'};$script:barX=1;$script:barStep=7;$block.Left=1;if([System.IO.Directory]::Exists($script:runRoot)){Remove-Item -LiteralPath $script:runRoot -Recurse -Force};[System.IO.Directory]::CreateDirectory($script:outputRoot)|Out-Null;$script:planPath=Join-Path $script:outputRoot 'install-plan.json';$args=@('-NoProfile','-ExecutionPolicy','Bypass','-File',$engine,'-DryRun','-OutputRoot',$script:outputRoot);if($Additional){$args+='-AdditionalSearch'};$argumentLine=Join-NativeArguments $args;$detectStdout=Join-Path $script:outputRoot 'engine-stdout.txt';$detectStderr=Join-Path $script:outputRoot 'engine-stderr.txt';$script:process=Start-Process powershell.exe -ArgumentList $argumentLine -PassThru -WindowStyle Hidden -RedirectStandardOutput $detectStdout -RedirectStandardError $detectStderr;$timer.Start()}
 function Get-PeMachineForRunningProduct {
     param([string]$Path)
@@ -403,7 +423,7 @@ function Confirm-SetupCancel {
     $answer=[System.Windows.Forms.MessageBox]::Show('セットアップを中止しますか？','DenGo Controller Converter セットアップ',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Question)
     return $answer -eq [System.Windows.Forms.DialogResult]::Yes
 }
-$timer.Add_Tick({$limit=$track.ClientSize.Width-$block.Width-2;$script:barX+=$script:barStep;if($script:barX-ge$limit){$script:barX=$limit;$script:barStep=-7};if($script:barX-le1){$script:barX=1;$script:barStep=7};$block.Left=$script:barX;if($null-eq$script:process-or-not$script:process.HasExited){return};$timer.Stop();$code=$script:process.ExitCode;$script:process.Dispose();$script:process=$null;if(-not[System.IO.File]::Exists($script:planPath)){$failureRoot=[System.IO.Path]::GetDirectoryName($script:planPath);$stderrPath=Join-Path $failureRoot 'engine-stderr.txt';$stdoutPath=Join-Path $failureRoot 'engine-stdout.txt';$detail='';if([System.IO.File]::Exists($stderrPath)){$detail=[System.IO.File]::ReadAllText($stderrPath,[System.Text.Encoding]::Default).Trim()};if([string]::IsNullOrWhiteSpace($detail)-and[System.IO.File]::Exists($stdoutPath)){$detail=[System.IO.File]::ReadAllText($stdoutPath,[System.Text.Encoding]::Default).Trim()};$message='処理結果を確認できませんでした。 終了コード: '+$code;if(-not[string]::IsNullOrWhiteSpace($detail)){$message+=[System.Environment]::NewLine+[System.Environment]::NewLine+$detail};[System.Windows.Forms.MessageBox]::Show($message,'DenGo セットアップ')|Out-Null;Set-Page 'welcome';return};$script:plan=[System.IO.File]::ReadAllText($script:planPath,[System.Text.Encoding]::UTF8)|ConvertFrom-Json;if(-not[bool]$script:plan.Succeeded){$detail=[string]$script:plan.ErrorMessage;if([string]::IsNullOrWhiteSpace($detail)){$detail='処理に失敗しました'};[System.Windows.Forms.MessageBox]::Show($detail,'DenGo セットアップ')|Out-Null;Set-Page 'welcome';return};if($script:operation-eq'real-apply'){$script:operation='idle';$script:lastResultAvailable=$true;Show-Results;return};if(-not$script:missingBveEXShown-and(Has-DetectedBveWithoutBveEX)){$script:missingBveEXShown=$true;$script:bveIntegrationSkipped=$true;Show-MissingBveEXDialog};if(-not$script:unsupportedPCSX2Shown-and(Has-UnsupportedCurrentPCSX2)){$script:unsupportedPCSX2Shown=$true;Show-UnsupportedPCSX2Dialog};$script:conflicts=@();foreach($n in @('PCSX2','RPCS3')){if(Has-Conflict $n){$script:conflicts+=$n}};$script:conflictIndex=0;$script:decisions=@{};if(@($script:conflicts).Count-eq0){Start-SandboxApply}else{Show-Conflict}})
+$timer.Add_Tick({$limit=$track.ClientSize.Width-$block.Width-2;$script:barX+=$script:barStep;if($script:barX-ge$limit){$script:barX=$limit;$script:barStep=-7};if($script:barX-le1){$script:barX=1;$script:barStep=7};$block.Left=$script:barX;if($null-eq$script:process-or-not$script:process.HasExited){return};$timer.Stop();$code=$script:process.ExitCode;$script:process.Dispose();$script:process=$null;if(-not[System.IO.File]::Exists($script:planPath)){$failureRoot=[System.IO.Path]::GetDirectoryName($script:planPath);$stderrPath=Join-Path $failureRoot 'engine-stderr.txt';$stdoutPath=Join-Path $failureRoot 'engine-stdout.txt';$detail='';if([System.IO.File]::Exists($stderrPath)){$detail=Read-TextFileShared $stderrPath};if([string]::IsNullOrWhiteSpace($detail)-and[System.IO.File]::Exists($stdoutPath)){$detail=Read-TextFileShared $stdoutPath};$message='処理結果を確認できませんでした。 終了コード: '+$code;if(-not[string]::IsNullOrWhiteSpace($detail)){$message+=[System.Environment]::NewLine+[System.Environment]::NewLine+$detail};[System.Windows.Forms.MessageBox]::Show($message,'DenGo セットアップ')|Out-Null;Set-Page 'welcome';return};$script:plan=[System.IO.File]::ReadAllText($script:planPath,[System.Text.Encoding]::UTF8)|ConvertFrom-Json;if(-not[bool]$script:plan.Succeeded){$detail=[string]$script:plan.ErrorMessage;if([string]::IsNullOrWhiteSpace($detail)){$detail='処理に失敗しました'};[System.Windows.Forms.MessageBox]::Show($detail,'DenGo セットアップ')|Out-Null;Set-Page 'welcome';return};if($script:operation-eq'real-apply'){$script:operation='idle';$script:lastResultAvailable=$true;Show-Results;return};if(-not$script:missingBveEXShown-and(Has-DetectedBveWithoutBveEX)){$script:missingBveEXShown=$true;$script:bveIntegrationSkipped=$true;Show-MissingBveEXDialog};if(-not$script:unsupportedPCSX2Shown-and(Has-UnsupportedCurrentPCSX2)){$script:unsupportedPCSX2Shown=$true;Show-UnsupportedPCSX2Dialog};$script:conflicts=@();foreach($n in @('PCSX2','RPCS3')){if(Has-Conflict $n){$script:conflicts+=$n}};$script:conflictIndex=0;$script:decisions=@{};if(@($script:conflicts).Count-eq0){Start-SandboxApply}else{Show-Conflict}})
 $next.Add_Click({if(-not(Confirm-RunningProductsClosed)){if(Confirm-SetupCancel){$script:allowClose=$true;$form.Close()};return};Start-Detection $false})
 $search.Add_Click({Start-Detection $true})
 $cancel.Add_Click({
