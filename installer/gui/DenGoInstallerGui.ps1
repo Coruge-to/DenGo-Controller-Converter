@@ -197,157 +197,58 @@ function Has-UnsupportedCurrentPCSX2 {
         ([string]$_.Mode).IndexOf('CurrentIntegrated',[System.StringComparison]::Ordinal) -ge 0
     }).Count -gt 0
 }
+function Show-DependencyWarningDialog {
+    param([string]$MainInstruction,[string]$Content,[string]$DistributionUrl)
+    $dialog=New-Object System.Windows.Forms.Form
+    $dialog.Text='DenGo Controller Converter セットアップ'
+    $dialog.StartPosition='CenterParent'
+    $dialog.ClientSize=New-Object System.Drawing.Size(520,220)
+    $dialog.FormBorderStyle='FixedDialog'
+    $dialog.MaximizeBox=$false
+    $dialog.MinimizeBox=$false
+    $dialog.ShowInTaskbar=$false
+    $dialog.Font=New-Object System.Drawing.Font('Yu Gothic UI',9)
+    $dialog.BackColor=[System.Drawing.Color]::White
+    $mainLabel=New-Object System.Windows.Forms.Label
+    $mainLabel.Text=$MainInstruction
+    $mainLabel.Font=New-Object System.Drawing.Font('Yu Gothic UI',12,[System.Drawing.FontStyle]::Bold)
+    $mainLabel.AutoSize=$true
+    $mainLabel.Location=New-Object System.Drawing.Point(28,27)
+    $dialog.Controls.Add($mainLabel)
+    $contentLabel=New-Object System.Windows.Forms.Label
+    $contentLabel.Text=$Content
+    $contentLabel.Font=New-Object System.Drawing.Font('Yu Gothic UI',10)
+    $contentLabel.AutoSize=$true
+    $contentLabel.Location=New-Object System.Drawing.Point(31,74)
+    $dialog.Controls.Add($contentLabel)
+    $openButton=New-Object System.Windows.Forms.Button
+    $openButton.Text='配布ページを開く'
+    $openButton.Size=New-Object System.Drawing.Size(150,34)
+    $openButton.Location=New-Object System.Drawing.Point(188,163)
+    $openButton.FlatStyle='Flat'
+    $openButton.FlatAppearance.BorderColor=[System.Drawing.Color]::FromArgb(145,145,145)
+    $openButton.BackColor=[System.Drawing.Color]::White
+    $dialog.Controls.Add($openButton)
+    $skipButton=New-Object System.Windows.Forms.Button
+    $skipButton.Text='設定をスキップ'
+    $skipButton.Size=New-Object System.Drawing.Size(150,34)
+    $skipButton.Location=New-Object System.Drawing.Point(348,163)
+    $skipButton.FlatStyle='Flat'
+    $skipButton.FlatAppearance.BorderColor=[System.Drawing.Color]::FromArgb(0,103,192)
+    $skipButton.BackColor=[System.Drawing.Color]::FromArgb(0,103,192)
+    $skipButton.ForeColor=[System.Drawing.Color]::White
+    $dialog.Controls.Add($skipButton)
+    $dialog.AcceptButton=$skipButton
+    $dialog.CancelButton=$skipButton
+    $openButton.Add_Click({Start-Process -FilePath $DistributionUrl|Out-Null})
+    $skipButton.Add_Click({$dialog.DialogResult=[System.Windows.Forms.DialogResult]::Cancel;$dialog.Close()})
+    try{[void]$dialog.ShowDialog($form)}finally{$mainLabel.Font.Dispose();$contentLabel.Font.Dispose();$dialog.Dispose()}
+}
 function Show-UnsupportedPCSX2Dialog {
-    if (-not ('DenGo.NativeTaskDialogV3' -as [type])) {
-        [void](Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-namespace DenGo {
-[StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode, Pack=4)] public struct TASKDIALOG_BUTTON_V3 { public int nButtonID; [MarshalAs(UnmanagedType.LPWStr)] public string pszButtonText; }
-[StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode, Pack=4)] public struct TASKDIALOGCONFIG_V3 { public uint cbSize; public IntPtr hwndParent; public IntPtr hInstance; public uint dwFlags; public uint dwCommonButtons; [MarshalAs(UnmanagedType.LPWStr)] public string pszWindowTitle; public IntPtr mainIcon; [MarshalAs(UnmanagedType.LPWStr)] public string pszMainInstruction; [MarshalAs(UnmanagedType.LPWStr)] public string pszContent; public uint cButtons; public IntPtr pButtons; public int nDefaultButton; public uint cRadioButtons; public IntPtr pRadioButtons; public int nDefaultRadioButton; public IntPtr pszVerificationText; public IntPtr pszExpandedInformation; public IntPtr pszExpandedControlText; public IntPtr pszCollapsedControlText; public IntPtr footerIcon; public IntPtr pszFooter; public IntPtr pfCallback; public IntPtr lpCallbackData; public uint cxWidth; }
-[StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)] public struct ACTCTX_V3 { public uint cbSize; public uint dwFlags; [MarshalAs(UnmanagedType.LPWStr)] public string lpSource; public ushort wProcessorArchitecture; public ushort wLangId; public string lpAssemblyDirectory; public string lpResourceName; public string lpApplicationName; public IntPtr hModule; }
-public static class NativeTaskDialogV3 {
-[DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] public static extern IntPtr CreateActCtxW(ref ACTCTX_V3 actctx);
-[DllImport("kernel32.dll", SetLastError=true)] [return: MarshalAs(UnmanagedType.Bool)] public static extern bool ActivateActCtx(IntPtr hActCtx, out UIntPtr cookie);
-[DllImport("kernel32.dll", SetLastError=true)] [return: MarshalAs(UnmanagedType.Bool)] public static extern bool DeactivateActCtx(uint flags, UIntPtr cookie);
-[DllImport("kernel32.dll")] public static extern void ReleaseActCtx(IntPtr hActCtx);
-[DllImport("comctl32.dll", CharSet=CharSet.Unicode, PreserveSig=true)] public static extern int TaskDialogIndirect(ref TASKDIALOGCONFIG_V3 config, out int button, out int radio, out bool verification);
-}
-}
-'@ -Language CSharp)
-    }
-    $openId=1001
-    $skipId=1002
-    $buttonSize=[System.Runtime.InteropServices.Marshal]::SizeOf([type][DenGo.TASKDIALOG_BUTTON_V3])
-    $memory=[System.Runtime.InteropServices.Marshal]::AllocHGlobal($buttonSize*2)
-    $manifestPath=Join-Path $env:TEMP ('DenGo-CommonControls-v6-'+[System.Guid]::NewGuid().ToString('N')+'.manifest')
-    $actCtxHandle=[IntPtr]::Zero
-    $cookie=[UIntPtr]::Zero
-    $activated=$false
-    try {
-        $open=New-Object DenGo.TASKDIALOG_BUTTON_V3
-        $open.nButtonID=$openId
-        $open.pszButtonText='配布ページを開く'
-        $skip=New-Object DenGo.TASKDIALOG_BUTTON_V3
-        $skip.nButtonID=$skipId
-        $skip.pszButtonText='設定をスキップ'
-        [System.Runtime.InteropServices.Marshal]::StructureToPtr($open,$memory,$false)
-        $second=[IntPtr]::Add($memory,$buttonSize)
-        [System.Runtime.InteropServices.Marshal]::StructureToPtr($skip,$second,$false)
-        $manifest='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0"><dependency><dependentAssembly><assemblyIdentity type="win32" name="Microsoft.Windows.Common-Controls" version="6.0.0.0" processorArchitecture="*" publicKeyToken="6595b64144ccf1df" language="*" /></dependentAssembly></dependency></assembly>'
-        [System.IO.File]::WriteAllText($manifestPath,$manifest,(New-Object System.Text.UTF8Encoding($false)))
-        $actCtx=New-Object DenGo.ACTCTX_V3
-        $actCtx.cbSize=[System.Runtime.InteropServices.Marshal]::SizeOf([type][DenGo.ACTCTX_V3])
-        $actCtx.lpSource=$manifestPath
-        $actCtxHandle=[DenGo.NativeTaskDialogV3]::CreateActCtxW([ref]$actCtx)
-        if($actCtxHandle-eq(New-Object IntPtr(-1))){throw('CreateActCtxW failed. Win32Error={0}' -f [System.Runtime.InteropServices.Marshal]::GetLastWin32Error())}
-        $activated=[DenGo.NativeTaskDialogV3]::ActivateActCtx($actCtxHandle,[ref]$cookie)
-        if(-not$activated){throw('ActivateActCtx failed. Win32Error={0}' -f [System.Runtime.InteropServices.Marshal]::GetLastWin32Error())}
-        $config=New-Object DenGo.TASKDIALOGCONFIG_V3
-        $config.cbSize=[System.Runtime.InteropServices.Marshal]::SizeOf([type][DenGo.TASKDIALOGCONFIG_V3])
-        $config.hwndParent=$form.Handle
-        $config.dwFlags=0x00000008
-        $config.pszWindowTitle='DenGo Controller Converter セットアップ'
-        $config.pszMainInstruction='検出したPCSX2には対応していません'
-        $config.pszContent="PCSX2 ver1.7以降の新しい入力設定方式が検出されました`r`n正式対応しているPCSX2はver1.6.0です"
-        $config.cButtons=2
-        $config.pButtons=$memory
-        $config.nDefaultButton=$skipId
-        while($true){
-            $selected=0
-            $radio=0
-            $verification=$false
-            $hr=[DenGo.NativeTaskDialogV3]::TaskDialogIndirect([ref]$config,[ref]$selected,[ref]$radio,[ref]$verification)
-            if($hr-ne0){throw('TaskDialogIndirect failed. HRESULT={0}' -f $hr)}
-            if($selected-eq$openId){Start-Process -FilePath 'https://forums.pcsx2.net/Thread-PCSX2-1-6-0-Standalone-Installer'|Out-Null;continue}
-            return
-        }
-    } finally {
-        if($activated){[void][DenGo.NativeTaskDialogV3]::DeactivateActCtx(0,$cookie)}
-        if($actCtxHandle-ne[IntPtr]::Zero-and$actCtxHandle-ne(New-Object IntPtr(-1))){[DenGo.NativeTaskDialogV3]::ReleaseActCtx($actCtxHandle)}
-        Remove-Item -LiteralPath $manifestPath -Force -ErrorAction SilentlyContinue
-        if($memory-ne[IntPtr]::Zero){
-            [System.Runtime.InteropServices.Marshal]::DestroyStructure($memory,[type][DenGo.TASKDIALOG_BUTTON_V3])
-            [System.Runtime.InteropServices.Marshal]::DestroyStructure([IntPtr]::Add($memory,$buttonSize),[type][DenGo.TASKDIALOG_BUTTON_V3])
-            [System.Runtime.InteropServices.Marshal]::FreeHGlobal($memory)
-        }
-    }
+    Show-DependencyWarningDialog '検出したPCSX2には対応していません' "PCSX2 ver1.7以降の新しい入力設定方式が検出されました`r`n正式対応しているPCSX2はver1.6.0です" 'https://forums.pcsx2.net/Thread-PCSX2-1-6-0-Standalone-Installer'
 }
 function Show-MissingBveEXDialog {
-    if (-not ('DenGo.NativeTaskDialogV3' -as [type])) {
-        [void](Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-namespace DenGo {
-[StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode, Pack=4)] public struct TASKDIALOG_BUTTON_V3 { public int nButtonID; [MarshalAs(UnmanagedType.LPWStr)] public string pszButtonText; }
-[StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode, Pack=4)] public struct TASKDIALOGCONFIG_V3 { public uint cbSize; public IntPtr hwndParent; public IntPtr hInstance; public uint dwFlags; public uint dwCommonButtons; [MarshalAs(UnmanagedType.LPWStr)] public string pszWindowTitle; public IntPtr mainIcon; [MarshalAs(UnmanagedType.LPWStr)] public string pszMainInstruction; [MarshalAs(UnmanagedType.LPWStr)] public string pszContent; public uint cButtons; public IntPtr pButtons; public int nDefaultButton; public uint cRadioButtons; public IntPtr pRadioButtons; public int nDefaultRadioButton; public IntPtr pszVerificationText; public IntPtr pszExpandedInformation; public IntPtr pszExpandedControlText; public IntPtr pszCollapsedControlText; public IntPtr footerIcon; public IntPtr pszFooter; public IntPtr pfCallback; public IntPtr lpCallbackData; public uint cxWidth; }
-[StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)] public struct ACTCTX_V3 { public uint cbSize; public uint dwFlags; [MarshalAs(UnmanagedType.LPWStr)] public string lpSource; public ushort wProcessorArchitecture; public ushort wLangId; public string lpAssemblyDirectory; public string lpResourceName; public string lpApplicationName; public IntPtr hModule; }
-public static class NativeTaskDialogV3 {
-[DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] public static extern IntPtr CreateActCtxW(ref ACTCTX_V3 actctx);
-[DllImport("kernel32.dll", SetLastError=true)] [return: MarshalAs(UnmanagedType.Bool)] public static extern bool ActivateActCtx(IntPtr hActCtx, out UIntPtr cookie);
-[DllImport("kernel32.dll", SetLastError=true)] [return: MarshalAs(UnmanagedType.Bool)] public static extern bool DeactivateActCtx(uint flags, UIntPtr cookie);
-[DllImport("kernel32.dll")] public static extern void ReleaseActCtx(IntPtr hActCtx);
-[DllImport("comctl32.dll", CharSet=CharSet.Unicode, PreserveSig=true)] public static extern int TaskDialogIndirect(ref TASKDIALOGCONFIG_V3 config, out int button, out int radio, out bool verification);
-}
-}
-'@ -Language CSharp)
-    }
-    $openId=1101
-    $skipId=1102
-    $buttonSize=[System.Runtime.InteropServices.Marshal]::SizeOf([type][DenGo.TASKDIALOG_BUTTON_V3])
-    $memory=[System.Runtime.InteropServices.Marshal]::AllocHGlobal($buttonSize*2)
-    $manifestPath=Join-Path $env:TEMP ('DenGo-CommonControls-v6-'+[System.Guid]::NewGuid().ToString('N')+'.manifest')
-    $actCtxHandle=[IntPtr]::Zero
-    $cookie=[UIntPtr]::Zero
-    $activated=$false
-    try {
-        $open=New-Object DenGo.TASKDIALOG_BUTTON_V3
-        $open.nButtonID=$openId
-        $open.pszButtonText='配布ページを開く'
-        $skip=New-Object DenGo.TASKDIALOG_BUTTON_V3
-        $skip.nButtonID=$skipId
-        $skip.pszButtonText='設定をスキップ'
-        [System.Runtime.InteropServices.Marshal]::StructureToPtr($open,$memory,$false)
-        $second=[IntPtr]::Add($memory,$buttonSize)
-        [System.Runtime.InteropServices.Marshal]::StructureToPtr($skip,$second,$false)
-        $manifest='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0"><dependency><dependentAssembly><assemblyIdentity type="win32" name="Microsoft.Windows.Common-Controls" version="6.0.0.0" processorArchitecture="*" publicKeyToken="6595b64144ccf1df" language="*" /></dependentAssembly></dependency></assembly>'
-        [System.IO.File]::WriteAllText($manifestPath,$manifest,(New-Object System.Text.UTF8Encoding($false)))
-        $actCtx=New-Object DenGo.ACTCTX_V3
-        $actCtx.cbSize=[System.Runtime.InteropServices.Marshal]::SizeOf([type][DenGo.ACTCTX_V3])
-        $actCtx.lpSource=$manifestPath
-        $actCtxHandle=[DenGo.NativeTaskDialogV3]::CreateActCtxW([ref]$actCtx)
-        if($actCtxHandle-eq(New-Object IntPtr(-1))){throw('CreateActCtxW failed. Win32Error={0}' -f [System.Runtime.InteropServices.Marshal]::GetLastWin32Error())}
-        $activated=[DenGo.NativeTaskDialogV3]::ActivateActCtx($actCtxHandle,[ref]$cookie)
-        if(-not$activated){throw('ActivateActCtx failed. Win32Error={0}' -f [System.Runtime.InteropServices.Marshal]::GetLastWin32Error())}
-        $config=New-Object DenGo.TASKDIALOGCONFIG_V3
-        $config.cbSize=[System.Runtime.InteropServices.Marshal]::SizeOf([type][DenGo.TASKDIALOGCONFIG_V3])
-        $config.hwndParent=$form.Handle
-        $config.dwFlags=0x00000008
-        $config.pszWindowTitle='DenGo Controller Converter セットアップ'
-        $config.pszMainInstruction='BveEXが見つかりません'
-        $config.pszContent="BveEXを導入してからセットアップを再実行するか、`r`n設定をスキップしてください"
-        $config.cButtons=2
-        $config.pButtons=$memory
-        $config.nDefaultButton=$skipId
-        while($true){
-            $selected=0
-            $radio=0
-            $verification=$false
-            $hr=[DenGo.NativeTaskDialogV3]::TaskDialogIndirect([ref]$config,[ref]$selected,[ref]$radio,[ref]$verification)
-            if($hr-ne0){throw('TaskDialogIndirect failed. HRESULT={0}' -f $hr)}
-            if($selected-eq$openId){Start-Process -FilePath 'https://bveex.okaoka-depot.com/download'|Out-Null;continue}
-            return
-        }
-    } finally {
-        if($activated){[void][DenGo.NativeTaskDialogV3]::DeactivateActCtx(0,$cookie)}
-        if($actCtxHandle-ne[IntPtr]::Zero-and$actCtxHandle-ne(New-Object IntPtr(-1))){[DenGo.NativeTaskDialogV3]::ReleaseActCtx($actCtxHandle)}
-        Remove-Item -LiteralPath $manifestPath -Force -ErrorAction SilentlyContinue
-        if($memory-ne[IntPtr]::Zero){
-            [System.Runtime.InteropServices.Marshal]::DestroyStructure($memory,[type][DenGo.TASKDIALOG_BUTTON_V3])
-            [System.Runtime.InteropServices.Marshal]::DestroyStructure([IntPtr]::Add($memory,$buttonSize),[type][DenGo.TASKDIALOG_BUTTON_V3])
-            [System.Runtime.InteropServices.Marshal]::FreeHGlobal($memory)
-        }
-    }
+    Show-DependencyWarningDialog 'BveEXが見つかりません' "BveEXを導入してからセットアップを再実行するか、設定をスキップしてください" 'https://bveex.okaoka-depot.com/download'
 }
 function Show-Conflict {if($script:conflictIndex -ge @($script:conflicts).Count){Start-SandboxApply;return};$name=[string]$script:conflicts[$script:conflictIndex];$conflictTitle.Text=$name+'の入力設定を確認';if([string]::Equals($name,'PCSX2',[System.StringComparison]::Ordinal)){$conflictText.Text="既存の入力設定が見つかりました`r`n既存の入力設定を置き換えますか？";$conflictNote.Text="※仮想ゲームパッドの設定が欠落・破損している場合、コンバータは動作しません"}else{$conflictText.Text="既存の入力設定ファイルが見つかりました`r`n標準設定で置き換えますか？";$conflictNote.Text="「はい」を選ぶと、現在の設定ファイルをバックアップしてから置き換えます"};Set-Page 'conflict'}
 function Resolve-Conflict([string]$Choice){$name=[string]$script:conflicts[$script:conflictIndex];$script:decisions[$name]=$Choice;$script:conflictIndex++;Show-Conflict}

@@ -72,6 +72,9 @@ try {
       Add-TestResult 'GUI-BVEEX-01' 'Missing BveEX message is exact' ($bveMissingMessage1 -ge 0 -and $bveMissingMessage2 -ge 0 -and $bveMissingMessage3 -ge 0) (("Line1={0};Line2={1};Line3={2}" -f $bveMissingMessage1,$bveMissingMessage2,$bveMissingMessage3))
       Add-TestResult 'GUI-BVEEX-02' 'BveEX distribution and skip actions exist' ($bveDownloadUrl -ge 0 -and $openText -ge 0 -and $skipText -ge 0) (("Url={0};Open={1};Skip={2}" -f $bveDownloadUrl,$openText,$skipText))
       Add-TestResult 'GUI-BVEEX-03' 'Missing BveEX preview exists' ($bveMissingPreview -ge 0) ('Index=' + [string]$bveMissingPreview)
+      $dependencyDialog = Get-IndexOrdinal $gui 'function Show-DependencyWarningDialog {'
+      $taskDialogCall = Get-IndexOrdinal $gui 'TaskDialogIndirect'
+      Add-TestResult 'GUI-DEPENDENCY-01' 'Dependency warnings use managed Windows Forms dialog' ($dependencyDialog -ge 0 -and $taskDialogCall -lt 0) (("Dialog={0};TaskDialog={1}" -f $dependencyDialog,$taskDialogCall))
       $skipSwitch = Get-IndexOrdinal $engine '[switch]$SkipBveIntegration'
       $currentFlag = Get-IndexOrdinal $engine 'BveExCurrentInstalled=[bool]$bveExCurrentInstalled'
       $correctLegacy = Get-IndexOrdinal $engine "C:\Users\Public\Documents\BveEx\Legacy\Extensions"
