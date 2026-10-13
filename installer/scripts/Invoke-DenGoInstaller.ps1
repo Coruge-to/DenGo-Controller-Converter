@@ -726,8 +726,7 @@ foreach ($candidate in $candidates) {
         $currentIni = Join-Path $configurationRoot 'inis\PCSX2.ini'
         if ([System.IO.File]::Exists($legacyIni)) {
             $mode = $mode + '-LegacyLilyPad'
-            $pathLines = @([System.IO.File]::ReadAllLines($legacyIni,[System.Text.Encoding]::Default) | Where-Object { $_ -match '\ALast Config Path=' })
-            if (@($pathLines).Count -eq 1) { $profileDirectory=([string]$pathLines[0]).Substring('Last Config Path='.Length).Trim() } else { $state='UnsupportedOrAmbiguous' }
+            $profileDirectory=Join-Path $configurationRoot 'inis'
         } elseif ([System.IO.File]::Exists($currentIni)) {
             $currentText = [System.IO.File]::ReadAllText($currentIni,[System.Text.Encoding]::UTF8)
             if ($currentText.IndexOf('[InputSources]',[System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and $currentText.IndexOf('[Pad]',[System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and $currentText.IndexOf('[Pad1]',[System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
@@ -769,11 +768,11 @@ if (-not [bool]$SkipBveIntegration) {
     }
 }
 if (@($supportedPcsx2).Count -eq 1) {
-    [void]$plan.Add((New-PlanItem 'PCSX2' 'InputProfile' $sources.PCSX2Profile (Join-Path ([string]$supportedPcsx2[0].ProfileDirectory) 'DenGo-Controller-Converter.lily') $false $true))
-    $effectiveSource = Join-Path $outputRoot 'PCSX2-LilyPad.normalized.ini'
-    $replaceKeyboardBindings = [bool]$ReplaceModifiedPCSX2Profile -or -not [bool]$legacyKeyboardInitialized
-    New-NormalizedLegacyLilyPadFile ([string]$supportedPcsx2[0].EffectiveInputProfile) $sources.PCSX2Profile $effectiveSource $replaceKeyboardBindings
-    [void]$plan.Add((New-PlanItem 'PCSX2' 'EffectiveInputProfile' $effectiveSource ([string]$supportedPcsx2[0].EffectiveInputProfile) $false $true))
+    $dedicatedProfileName = 'DenGo-Controller-Converter.lily'
+    $legacyIniPath = [string]$supportedPcsx2[0].EffectiveInputProfile
+    $activeProfileSource = Join-Path ([System.IO.Path]::GetDirectoryName($sources.PCSX2Profile)) 'DenGo-LilyPad-Active.ini'
+    [void]$plan.Add((New-PlanItem 'PCSX2' 'InputProfile' $sources.PCSX2Profile (Join-Path ([string]$supportedPcsx2[0].ProfileDirectory) $dedicatedProfileName) $true $false))
+    [void]$plan.Add((New-PlanItem 'PCSX2' 'EffectiveInputProfile' $activeProfileSource $legacyIniPath $true $false))
 }
 if (@($rpcs3).Count -eq 1) { [void]$plan.Add((New-PlanItem 'RPCS3' 'InputProfile' $sources.RPCS3Profile (Join-Path ([string]$rpcs3[0].ProfileDirectory) 'Den-Go-Controller.yml') $false $true)) }
 
