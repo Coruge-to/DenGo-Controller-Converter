@@ -126,9 +126,9 @@ $conflict=New-Object System.Windows.Forms.Panel; $conflict.Dock='Fill';$conflict
 $conflictTitle=New-Object System.Windows.Forms.Label
 $conflictTitle.Font=New-Object System.Drawing.Font('Yu Gothic UI',14,[System.Drawing.FontStyle]::Bold);$conflictTitle.AutoSize=$true;$conflictTitle.Location=New-Object System.Drawing.Point(42,45);$conflict.Controls.Add($conflictTitle)
 $conflictText=New-Object System.Windows.Forms.Label
-$conflictText.Text="既存の入力設定ファイルが見つかりました`r`n標準設定で置き換えますか？";$conflictText.Font=New-Object System.Drawing.Font('Yu Gothic UI',10);$conflictText.AutoSize=$true;$conflictText.Location=New-Object System.Drawing.Point(45,88);$conflict.Controls.Add($conflictText)
+$conflictText.Text="既存の入力設定が見つかりました`r`n既存の入力設定を置き換えますか？";$conflictText.Font=New-Object System.Drawing.Font('Yu Gothic UI',10);$conflictText.AutoSize=$true;$conflictText.Location=New-Object System.Drawing.Point(45,88);$conflict.Controls.Add($conflictText)
 $conflictNote=New-Object System.Windows.Forms.Label
-$conflictNote.Text="「はい」を選ぶと、現在の設定ファイルを`r`nバックアップしてから置き換えます";$conflictNote.Font=New-Object System.Drawing.Font('Yu Gothic UI',10);$conflictNote.ForeColor=[System.Drawing.Color]::FromArgb(45,45,45);$conflictNote.AutoSize=$true;$conflictNote.Location=New-Object System.Drawing.Point(45,157);$conflict.Controls.Add($conflictNote)
+$conflictNote.Text="※仮想ゲームパッドの設定が欠落・破損している場合、コンバータは動作しません";$conflictNote.Font=New-Object System.Drawing.Font('Yu Gothic UI',10);$conflictNote.ForeColor=[System.Drawing.Color]::FromArgb(45,45,45);$conflictNote.AutoSize=$true;$conflictNote.Location=New-Object System.Drawing.Point(45,157);$conflict.Controls.Add($conflictNote)
 
 $result=New-Object System.Windows.Forms.Panel;$result.Dock='Fill';$result.Visible=$false;$content.Controls.Add($result)
 $resultTitle=New-Object System.Windows.Forms.Label
@@ -180,7 +180,7 @@ function Set-Page([string]$Name) {
 }
 function Has-Detected([string]$Platform,[string]$Mode) {return @($script:plan.Detected|Where-Object{$_.Platform -eq $Platform -and ($Mode -eq '' -or $_.Mode -eq $Mode)-and $_.State -eq 'Detected'}).Count-gt 0}
 function Has-Conflict([string]$Platform){return @($script:plan.Plan|Where-Object{$_.Platform -eq $Platform -and $_.Action -eq 'PreserveUserModified'}).Count-gt 0}
-function Show-Conflict {if($script:conflictIndex -ge @($script:conflicts).Count){Start-SandboxApply;return};$name=[string]$script:conflicts[$script:conflictIndex];$conflictTitle.Text=$name+'の入力設定を確認';Set-Page 'conflict'}
+function Show-Conflict {if($script:conflictIndex -ge @($script:conflicts).Count){Start-SandboxApply;return};$name=[string]$script:conflicts[$script:conflictIndex];$conflictTitle.Text=$name+'の入力設定を確認';if([string]::Equals($name,'PCSX2',[System.StringComparison]::Ordinal)){$conflictText.Text="既存の入力設定が見つかりました`r`n既存の入力設定を置き換えますか？";$conflictNote.Text="※仮想ゲームパッドの設定が欠落・破損している場合、コンバータは動作しません"}else{$conflictText.Text="既存の入力設定ファイルが見つかりました`r`n標準設定で置き換えますか？";$conflictNote.Text="「はい」を選ぶと、現在の設定ファイルをバックアップしてから置き換えます"};Set-Page 'conflict'}
 function Resolve-Conflict([string]$Choice){$name=[string]$script:conflicts[$script:conflictIndex];$script:decisions[$name]=$Choice;$script:conflictIndex++;Show-Conflict}
 function Add-Row([int]$Row,[string]$Kind,[string]$Software,[string]$State){$table.Controls.Add((New-StatusSymbol $Kind),0,$Row);$table.Controls.Add((New-Cell $Software 'MiddleLeft' $false),1,$Row);$table.Controls.Add((New-Cell $State 'MiddleLeft' $false),2,$Row)}
 function Get-ApplyResult([string]$Platform,[string]$Component){return @($script:plan.ApplyResults | Where-Object { $_.Platform -eq $Platform -and ([string]::IsNullOrWhiteSpace($Component) -or $_.Component -eq $Component) })}

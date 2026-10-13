@@ -43,6 +43,16 @@ $payload = Join-Path $installerRoot 'build\payload'
 $assets = Join-Path $installerRoot 'assets\input-profiles'
 $installerStateRoot = Join-Path $env:LOCALAPPDATA 'DenGo Controller Converter\InstallerState'
 $installMarker = Join-Path $installerStateRoot 'installing.json'
+$installedStatePath = Join-Path $installerStateRoot 'installed-state.json'
+$legacyKeyboardInitialized = $false
+if ([System.IO.File]::Exists($installedStatePath)) {
+    try {
+        $previousInstalledState = [System.IO.File]::ReadAllText($installedStatePath,[System.Text.Encoding]::UTF8) | ConvertFrom-Json
+        if ($null -ne $previousInstalledState.PSObject.Properties['PCSX2LegacyKeyboardInitialized']) { $legacyKeyboardInitialized = [bool]$previousInstalledState.PCSX2LegacyKeyboardInitialized }
+    } catch {
+        $legacyKeyboardInitialized = $false
+    }
+}
 $interruptedInstallDetected = [System.IO.File]::Exists($installMarker)
 if ([string]::IsNullOrWhiteSpace($OutputRoot)) {
     $outputRoot = Join-Path $env:TEMP 'DenGoInstallerPreview'
@@ -213,6 +223,11 @@ function Convert-ToSandboxDestination {
 
 function Copy-VerifiedFile {
     param([string]$Source,[string]$Destination,[string]$BackupRoot)
+    $sourceSha = Get-Sha256 $Source
+    if ([System.IO.File]::Exists($Destination)) {
+        $destinationSha = Get-Sha256 $Destination
+        if ([string]::Equals($sourceSha,$destinationSha,[System.StringComparison]::Ordinal)) { return '' }
+    }
     $parent = [System.IO.Path]::GetDirectoryName($Destination)
     [System.IO.Directory]::CreateDirectory($parent) | Out-Null
     $backup = ''
@@ -222,14 +237,17 @@ function Copy-VerifiedFile {
         [System.IO.File]::Copy($Destination,$backup,$false)
     }
     $temporary = $Destination + '.dengo.tmp'
-    [System.IO.File]::Copy($Source,$temporary,$true)
-    if ((Get-Sha256 $temporary) -ne (Get-Sha256 $Source)) { throw 'Temporary copy SHA256 mismatch.' }
-    [System.IO.File]::Copy($temporary,$Destination,$true)
-    [System.IO.File]::Delete($temporary)
-    if ((Get-Sha256 $Destination) -ne (Get-Sha256 $Source)) { throw 'Destination SHA256 mismatch.' }
+    try {
+        if ([System.IO.File]::Exists($temporary)) { [System.IO.File]::Delete($temporary) }
+        [System.IO.File]::Copy($Source,$temporary,$false)
+        if ((Get-Sha256 $temporary) -ne $sourceSha) { throw 'Temporary copy SHA256 mismatch.' }
+        [System.IO.File]::Copy($temporary,$Destination,$true)
+        if ((Get-Sha256 $Destination) -ne $sourceSha) { throw 'Destination SHA256 mismatch.' }
+    } finally {
+        if ([System.IO.File]::Exists($temporary)) { [System.IO.File]::Delete($temporary) }
+    }
     return $backup
 }
-
 function Invoke-SandboxApply {
     param([object[]]$Plan,[string]$Root)
     if ([System.IO.Directory]::Exists($Root)) { Remove-Item -LiteralPath $Root -Recurse -Force }
@@ -453,6 +471,7 @@ function Write-InstalledState {
     $state = [pscustomobject][ordered]@{
         SchemaVersion=1
         ProductVersion='2.0.0'
+        PCSX2LegacyKeyboardInitialized=([bool]$legacyKeyboardInitialized -or [bool]$ReplaceModifiedPCSX2Profile)
         InstalledAt=[System.DateTimeOffset]::Now.ToString('o')
         BackupRoot=$BackupRoot
         Shortcut=[pscustomobject][ordered]@{Requested=$ShortcutRequested;Created=$ShortcutCreated;Path=$ShortcutPath}
@@ -492,6 +511,122 @@ function Invoke-RealApply {
     return [pscustomobject]@{Succeeded=$succeeded;ErrorCode=$errorCode;ErrorMessage=$errorMessage;FailedSet=$failedSet;RollbackAttempted=$rollbackAttempted;RollbackSucceeded=$rollbackSucceeded;RollbackError=$rollbackError;BackupRoot=$backupRoot;Results=[object[]]@($results)}
 }
 
+function Get-LilyPadDeviceSection {
+    param([string[]]$Lines,[string]$DisplayName)
+    $result = New-Object System.Collections.ArrayList
+    $section = New-Object System.Collections.ArrayList
+    $inDevice = $false
+    $matched = $false
+    foreach ($line in $Lines) {
+        if ($line -match '^\[Device\s+\d+\]$') {
+            if ($inDevice -and $matched) { return [string[]]@($section) }
+            $section.Clear()
+            [void]$section.Add($line)
+            $inDevice = $true
+            $matched = $false
+            continue
+        }
+        if (-not $inDevice) { continue }
+        [void]$section.Add($line)
+        if ([string]::Equals($line,('Display Name=' + $DisplayName),[System.StringComparison]::Ordinal)) { $matched = $true }
+    }
+    if ($inDevice -and $matched) { return [string[]]@($section) }
+    return [string[]]@()
+}
+function Get-LilyPadBindingPayloads {
+    param([string[]]$SectionLines)
+    $result = New-Object System.Collections.ArrayList
+    foreach ($line in $SectionLines) {
+        if ($line -match '^Binding\s+\d+=(.+)$') { [void]$result.Add([string]$Matches[1]) }
+    }
+    return [string[]]@($result)
+}
+function Write-LilyPadDeviceSection {
+    param([System.Collections.ArrayList]$Output,[string[]]$SectionLines,[string[]]$BindingPayloads)
+    $inserted = $false
+    foreach ($line in $SectionLines) {
+        if ($line -match '^Binding\s+\d+=') { continue }
+        [void]$Output.Add($line)
+        if (-not $inserted -and $line -match '^Type=') {
+            $index = 0
+            foreach ($binding in $BindingPayloads) {
+                [void]$Output.Add(('Binding {0}={1}' -f $index,$binding))
+                $index++
+            }
+            $inserted = $true
+        }
+    }
+    if (-not $inserted) {
+        $index = 0
+        foreach ($binding in $BindingPayloads) {
+            [void]$Output.Add(('Binding {0}={1}' -f $index,$binding))
+            $index++
+        }
+    }
+}
+function New-NormalizedLegacyLilyPadFile {
+    param([string]$SourcePath,[string]$TemplatePath,[string]$OutputPath,[bool]$ReplaceKeyboardBindings)
+    $lines = @([System.IO.File]::ReadAllLines($SourcePath,[System.Text.Encoding]::Default))
+    $templateLines = @([System.IO.File]::ReadAllLines($TemplatePath,[System.Text.Encoding]::Default))
+    $templateKeyboardSection = @(Get-LilyPadDeviceSection ([string[]]@($templateLines)) 'WM Keyboard')
+    $templateKeyboardBindings = @(Get-LilyPadBindingPayloads ([string[]]@($templateKeyboardSection)))
+    if (@($templateKeyboardBindings).Count -eq 0) { throw 'WM Keyboard bindings were not found in the DenGo template.' }
+    $requiredXInput = @(
+        '0x00200000, 0, 20, 65536, 0, 0, 1, 1, 1',
+        '0x00200001, 0, 22, 65536, 0, 0, 1, 1, 1',
+        '0x00200002, 0, 23, 65536, 0, 0, 1, 1, 1',
+        '0x00200003, 0, 21, 65536, 0, 0, 1, 1, 1',
+        '0x00200004, 0, 19, 65536, 0, 0, 1, 1, 1',
+        '0x00200008, 0, 26, 65536, 0, 0, 1, 1, 1',
+        '0x00200009, 0, 27, 65536, 0, 0, 1, 1, 1',
+        '0x0020000C, 0, 30, 65536, 0, 0, 1, 1, 1',
+        '0x0020000D, 0, 29, 65536, 0, 0, 1, 1, 1',
+        '0x0020000E, 0, 31, 65536, 0, 0, 1, 1, 1',
+        '0x0020000F, 0, 28, 26214, 0, 0, 1, 1, 1'
+    )
+    $output = New-Object System.Collections.ArrayList
+    $section = New-Object System.Collections.ArrayList
+    $inDevice = $false
+    $found = [pscustomobject]@{Keyboard=$false;XInput=$false}
+    $flush = {
+        if (@($section).Count -eq 0) { return }
+        $displayLine = @($section | Where-Object { $_ -match '^Display Name=' })
+        $displayName = if (@($displayLine).Count -eq 1) { ([string]$displayLine[0]).Substring('Display Name='.Length) } else { '' }
+        if ([string]::Equals($displayName,'WM Keyboard',[System.StringComparison]::Ordinal) -and $ReplaceKeyboardBindings) {
+            $found.Keyboard = $true
+            Write-LilyPadDeviceSection $output ([string[]]@($section)) ([string[]]@($templateKeyboardBindings))
+        } elseif ([string]::Equals($displayName,'XInput Pad 0',[System.StringComparison]::Ordinal)) {
+            $found.XInput = $true
+            $preserved = New-Object System.Collections.ArrayList
+            foreach ($line in $section) {
+                if ($line -match '^Binding\s+\d+=(.+)$') {
+                    $fields = @($Matches[1].Split(',') | ForEach-Object { $_.Trim() })
+                    if (@($fields).Count -eq 9 -and $fields[8] -eq '1') { continue }
+                    if (@($fields).Count -eq 9 -and $fields[2] -eq '28') { $fields[3]='26214' }
+                    [void]$preserved.Add(([System.String]::Join(', ',$fields)))
+                }
+            }
+            $combined = @($requiredXInput) + @($preserved)
+            Write-LilyPadDeviceSection $output ([string[]]@($section)) ([string[]]@($combined))
+        } else {
+            foreach ($line in $section) { [void]$output.Add($line) }
+        }
+        $section.Clear()
+    }
+    foreach ($line in $lines) {
+        if ($line -match '^\[Device\s+\d+\]$') {
+            if ($inDevice) { & $flush }
+            $inDevice = $true
+            [void]$section.Add($line)
+            continue
+        }
+        if ($inDevice) { [void]$section.Add($line) } else { [void]$output.Add($line) }
+    }
+    if ($inDevice) { & $flush }
+    if (-not [bool]$found.XInput) { throw 'XInput Pad 0 was not found in LilyPad.ini.' }
+    if ($ReplaceKeyboardBindings -and -not [bool]$found.Keyboard) { throw 'WM Keyboard was not found in LilyPad.ini.' }
+    [System.IO.File]::WriteAllLines($OutputPath,[string[]]@($output),[System.Text.Encoding]::Default)
+}
 function New-PlanItem {
     param([string]$Platform,[string]$Component,[string]$Source,[string]$Destination,[bool]$CreateParent,[bool]$PreserveModified)
     $sourceSha = Get-Sha256 $Source
@@ -575,6 +710,7 @@ foreach ($candidate in $candidates) {
     $mode = ''
     $inputDevices = ''
     $profileDirectory = ''
+    $effectiveInputProfile = ''
     if ([string]::Equals([string]$candidate.Platform,'BVE',[System.StringComparison]::Ordinal)) {
         $architecture = Get-PeMachine ([string]$candidate.Executable)
         $mode = if ([string]::Equals($architecture,'x86',[System.StringComparison]::Ordinal)) { 'BVE5' } elseif ([string]::Equals($architecture,'x64',[System.StringComparison]::Ordinal)) { 'BVE6' } else { 'Ambiguous' }
@@ -585,6 +721,7 @@ foreach ($candidate in $candidates) {
         $mode = if ($portable) { 'Portable' } else { 'CentralConfiguration' }
         $configurationRoot = if ($portable) { $exeDirectory } else { Join-Path ([System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::MyDocuments)) 'PCSX2' }
         $legacyIni = Join-Path $configurationRoot 'inis\LilyPad.ini'
+        $effectiveInputProfile = $legacyIni
         $currentIni = Join-Path $configurationRoot 'inis\PCSX2.ini'
         if ([System.IO.File]::Exists($legacyIni)) {
             $mode = $mode + '-LegacyLilyPad'
@@ -602,7 +739,7 @@ foreach ($candidate in $candidates) {
         $profileDirectory=Join-Path $exeDirectory 'config\input_configs\global'
         if (-not [System.IO.Directory]::Exists($profileDirectory)) { $state='DetectedButNotInitialized' }
     }
-    [void]$detected.Add([pscustomobject]@{Platform=$candidate.Platform;Executable=$candidate.Executable;State=$state;Mode=$mode;InputDevices=$inputDevices;ProfileDirectory=$profileDirectory;DetectionSource=$candidate.Source})
+    [void]$detected.Add([pscustomobject]@{Platform=$candidate.Platform;Executable=$candidate.Executable;State=$state;Mode=$mode;InputDevices=$inputDevices;ProfileDirectory=$profileDirectory;EffectiveInputProfile=$effectiveInputProfile;DetectionSource=$candidate.Source})
 }
 
 foreach ($steamProduct in @(Get-SteamUrlProducts)) { [void]$detected.Add([pscustomobject]@{Platform=$steamProduct.Platform;Executable=$steamProduct.Executable;State=$steamProduct.State;Mode=$steamProduct.Mode;InputDevices='';ProfileDirectory='';DetectionSource=$steamProduct.DetectionSource}) }
@@ -624,7 +761,13 @@ if ([System.IO.Directory]::Exists($legacyDir)) {
     [void]$plan.Add((New-PlanItem 'AtsEX Legacy' 'Bridge' $sources.LegacyBridge (Join-Path $legacyDir 'DenGoVehicleSpec.AtsExLegacy.Bridge.dll') $false $false))
     [void]$plan.Add((New-PlanItem 'AtsEX Legacy' 'VehicleSpec' $sources.LegacyVehicleSpec (Join-Path $legacyDir 'DenGoAtsExLegacyVehicleSpec.dll') $false $false))
 }
-if (@($pcsx2).Count -eq 1 -and ([string]$pcsx2[0].Mode).IndexOf('LegacyLilyPad',[System.StringComparison]::Ordinal) -ge 0) { [void]$plan.Add((New-PlanItem 'PCSX2' 'InputProfile' $sources.PCSX2Profile (Join-Path ([string]$pcsx2[0].ProfileDirectory) 'DenGo-Controller-Converter.lily') $false $true)) }
+if (@($pcsx2).Count -eq 1 -and ([string]$pcsx2[0].Mode).IndexOf('LegacyLilyPad',[System.StringComparison]::Ordinal) -ge 0) {
+    [void]$plan.Add((New-PlanItem 'PCSX2' 'InputProfile' $sources.PCSX2Profile (Join-Path ([string]$pcsx2[0].ProfileDirectory) 'DenGo-Controller-Converter.lily') $false $true))
+    $effectiveSource = Join-Path $outputRoot 'PCSX2-LilyPad.normalized.ini'
+    $replaceKeyboardBindings = [bool]$ReplaceModifiedPCSX2Profile -or -not [bool]$legacyKeyboardInitialized
+    New-NormalizedLegacyLilyPadFile ([string]$pcsx2[0].EffectiveInputProfile) $sources.PCSX2Profile $effectiveSource $replaceKeyboardBindings
+    [void]$plan.Add((New-PlanItem 'PCSX2' 'EffectiveInputProfile' $effectiveSource ([string]$pcsx2[0].EffectiveInputProfile) $false $true))
+}
 if (@($rpcs3).Count -eq 1) { [void]$plan.Add((New-PlanItem 'RPCS3' 'InputProfile' $sources.RPCS3Profile (Join-Path ([string]$rpcs3[0].ProfileDirectory) 'Den-Go-Controller.yml') $false $true)) }
 
 foreach ($item in @($plan)) {
