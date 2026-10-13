@@ -47,6 +47,21 @@ try {
     Add-TestResult 'PCSX2-C03' 'Exact PCSX2 names outrank fallback names' ($priorityNames -ge 0 -and $priorityCandidates -ge 0) (("Names={0};Candidates={1}" -f $priorityNames,$priorityCandidates))
     $uninstExclusion = Get-IndexOrdinal $engine '(uninst|installer|setup|update)'
     Add-TestResult 'PCSX2-C04' 'Installer uninstaller and updater names are excluded' ($uninstExclusion -ge 0) ('Index=' + [string]$uninstExclusion)
+      $unsupportedMode = Get-IndexOrdinal $engine "CurrentIntegrated"
+      $unsupportedStatus = Get-IndexOrdinal $engine "UnsupportedCurrent"
+      $supportedList = Get-IndexOrdinal $engine '$supportedPcsx2 = @($pcsx2 | Where-Object {'
+      Add-TestResult 'PCSX2-S01' 'Current PCSX2 is detected but unsupported' ($unsupportedMode -ge 0 -and $unsupportedStatus -ge 0) (("Mode={0};Status={1}" -f $unsupportedMode,$unsupportedStatus))
+      Add-TestResult 'PCSX2-S02' 'Only supported legacy PCSX2 enters the plan' ($supportedList -ge 0) ('Index=' + [string]$supportedList)
+      $message1 = Get-IndexOrdinal $gui 'PCSX2 ver1.7以降の新しい入力設定方式が検出されました'
+      $message2 = Get-IndexOrdinal $gui '正式対応しているPCSX2はver1.6.0です'
+      $message3 = Get-IndexOrdinal $gui '検出したPCSX2には対応していません'
+      $openText = Get-IndexOrdinal $gui '配布ページを開く'
+      $skipText = Get-IndexOrdinal $gui '設定をスキップ'
+      $legacyUrl = Get-IndexOrdinal $gui 'https://forums.pcsx2.net/Thread-PCSX2-1-6-0-Standalone-Installer'
+      Add-TestResult 'GUI-PCSX2-01' 'Unsupported PCSX2 message is exact' ($message1 -ge 0 -and $message2 -ge 0 -and $message3 -ge 0) (("Line1={0};Line2={1};Line3={2}" -f $message1,$message2,$message3))
+      Add-TestResult 'GUI-PCSX2-02' 'Download and skip actions exist' ($openText -ge 0 -and $skipText -ge 0 -and $legacyUrl -ge 0) (("Open={0};Skip={1};Url={2}" -f $openText,$skipText,$legacyUrl))
+      $unsupportedPreview = Get-IndexOrdinal $gui "PCSX2Unsupported"
+      Add-TestResult 'GUI-PCSX2-03' 'Unsupported PCSX2 preview exists' ($unsupportedPreview -ge 0) ('Index=' + [string]$unsupportedPreview)
     $assertIndex = Get-IndexOrdinal $engine 'Assert-TargetProcessesStopped'
     $markerCallIndex = Get-IndexOrdinal $engine '    Write-InstallMarker'
     Add-TestResult 'PROC-01' 'Process gate precedes install marker' ($assertIndex -ge 0 -and $markerCallIndex -ge 0 -and $assertIndex -lt $markerCallIndex) (("Assert={0};Marker={1}" -f $assertIndex,$markerCallIndex))

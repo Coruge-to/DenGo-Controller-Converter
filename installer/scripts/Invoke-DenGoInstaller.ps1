@@ -739,12 +739,14 @@ foreach ($candidate in $candidates) {
         $profileDirectory=Join-Path $exeDirectory 'config\input_configs\global'
         if (-not [System.IO.Directory]::Exists($profileDirectory)) { $state='DetectedButNotInitialized' }
     }
-    [void]$detected.Add([pscustomobject]@{Platform=$candidate.Platform;Executable=$candidate.Executable;State=$state;Mode=$mode;InputDevices=$inputDevices;ProfileDirectory=$profileDirectory;EffectiveInputProfile=$effectiveInputProfile;DetectionSource=$candidate.Source})
+    $supportStatus = if ([string]::Equals([string]$candidate.Platform,'PCSX2',[System.StringComparison]::Ordinal) -and $mode.IndexOf('CurrentIntegrated',[System.StringComparison]::Ordinal) -ge 0) { 'UnsupportedCurrent' } elseif ([string]::Equals([string]$candidate.Platform,'PCSX2',[System.StringComparison]::Ordinal) -and $mode.IndexOf('LegacyLilyPad',[System.StringComparison]::Ordinal) -ge 0 -and [string]::Equals($state,'Detected',[System.StringComparison]::Ordinal)) { 'Supported' } else { '' }
+    [void]$detected.Add([pscustomobject]@{Platform=$candidate.Platform;Executable=$candidate.Executable;State=$state;Mode=$mode;SupportStatus=$supportStatus;InputDevices=$inputDevices;ProfileDirectory=$profileDirectory;EffectiveInputProfile=$effectiveInputProfile;DetectionSource=$candidate.Source})
 }
 
 foreach ($steamProduct in @(Get-SteamUrlProducts)) { [void]$detected.Add([pscustomobject]@{Platform=$steamProduct.Platform;Executable=$steamProduct.Executable;State=$steamProduct.State;Mode=$steamProduct.Mode;InputDevices='';ProfileDirectory='';DetectionSource=$steamProduct.DetectionSource}) }
 $bve = @($detected | Where-Object { [string]::Equals([string]$_.Platform,'BVE',[System.StringComparison]::Ordinal) -and [string]::Equals([string]$_.State,'Detected',[System.StringComparison]::Ordinal) })
 $pcsx2 = @($detected | Where-Object { [string]::Equals([string]$_.Platform,'PCSX2',[System.StringComparison]::Ordinal) -and [string]::Equals([string]$_.State,'Detected',[System.StringComparison]::Ordinal) })
+$supportedPcsx2 = @($pcsx2 | Where-Object { ([string]$_.Mode).IndexOf('LegacyLilyPad',[System.StringComparison]::Ordinal) -ge 0 })
 $rpcs3 = @($detected | Where-Object { [string]::Equals([string]$_.Platform,'RPCS3',[System.StringComparison]::Ordinal) -and [string]::Equals([string]$_.State,'Detected',[System.StringComparison]::Ordinal) })
 
 $plan = New-Object System.Collections.ArrayList
@@ -761,12 +763,12 @@ if ([System.IO.Directory]::Exists($legacyDir)) {
     [void]$plan.Add((New-PlanItem 'AtsEX Legacy' 'Bridge' $sources.LegacyBridge (Join-Path $legacyDir 'DenGoVehicleSpec.AtsExLegacy.Bridge.dll') $false $false))
     [void]$plan.Add((New-PlanItem 'AtsEX Legacy' 'VehicleSpec' $sources.LegacyVehicleSpec (Join-Path $legacyDir 'DenGoAtsExLegacyVehicleSpec.dll') $false $false))
 }
-if (@($pcsx2).Count -eq 1 -and ([string]$pcsx2[0].Mode).IndexOf('LegacyLilyPad',[System.StringComparison]::Ordinal) -ge 0) {
-    [void]$plan.Add((New-PlanItem 'PCSX2' 'InputProfile' $sources.PCSX2Profile (Join-Path ([string]$pcsx2[0].ProfileDirectory) 'DenGo-Controller-Converter.lily') $false $true))
+if (@($supportedPcsx2).Count -eq 1) {
+    [void]$plan.Add((New-PlanItem 'PCSX2' 'InputProfile' $sources.PCSX2Profile (Join-Path ([string]$supportedPcsx2[0].ProfileDirectory) 'DenGo-Controller-Converter.lily') $false $true))
     $effectiveSource = Join-Path $outputRoot 'PCSX2-LilyPad.normalized.ini'
     $replaceKeyboardBindings = [bool]$ReplaceModifiedPCSX2Profile -or -not [bool]$legacyKeyboardInitialized
-    New-NormalizedLegacyLilyPadFile ([string]$pcsx2[0].EffectiveInputProfile) $sources.PCSX2Profile $effectiveSource $replaceKeyboardBindings
-    [void]$plan.Add((New-PlanItem 'PCSX2' 'EffectiveInputProfile' $effectiveSource ([string]$pcsx2[0].EffectiveInputProfile) $false $true))
+    New-NormalizedLegacyLilyPadFile ([string]$supportedPcsx2[0].EffectiveInputProfile) $sources.PCSX2Profile $effectiveSource $replaceKeyboardBindings
+    [void]$plan.Add((New-PlanItem 'PCSX2' 'EffectiveInputProfile' $effectiveSource ([string]$supportedPcsx2[0].EffectiveInputProfile) $false $true))
 }
 if (@($rpcs3).Count -eq 1) { [void]$plan.Add((New-PlanItem 'RPCS3' 'InputProfile' $sources.RPCS3Profile (Join-Path ([string]$rpcs3[0].ProfileDirectory) 'Den-Go-Controller.yml') $false $true)) }
 
