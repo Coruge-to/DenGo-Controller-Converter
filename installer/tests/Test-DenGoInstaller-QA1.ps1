@@ -82,8 +82,8 @@ try {
       Add-TestResult 'ENGINE-BVEEX-01' 'BVE integration can be skipped explicitly' ($skipSwitch -ge 0 -and $currentFlag -ge 0) (("Switch={0};Flag={1}" -f $skipSwitch,$currentFlag))
       Add-TestResult 'ENGINE-BVEEX-02' 'Legacy path is correct and old path is absent' ($correctLegacy -ge 0 -and $wrongLegacy -lt 0) (("Correct={0};Wrong={1}" -f $correctLegacy,$wrongLegacy))
     $assertIndex = Get-IndexOrdinal $engine 'Assert-TargetProcessesStopped'
-    $markerCallIndex = Get-IndexOrdinal $engine '    Write-InstallMarker'
-    Add-TestResult 'PROC-01' 'Process gate precedes install marker' ($assertIndex -ge 0 -and $markerCallIndex -ge 0 -and $assertIndex -lt $markerCallIndex) (("Assert={0};Marker={1}" -f $assertIndex,$markerCallIndex))
+    $gateOrder = & (Join-Path $PSScriptRoot 'QA1.ProcessGateOrder.ps1') -RepoRoot $repo
+    Add-TestResult 'PROC-01' 'Process gate precedes the transaction Begin and the first disk change' ($assertIndex -ge 0 -and [bool]$gateOrder.Ok) (("Assert={0};{1}" -f $assertIndex,$gateOrder.Detail))
 
     $blockedCode = Get-IndexOrdinal $engine 'BlockedByRunningProcesses'
     $blockedProducts = Get-IndexOrdinal $engine 'RunningProducts='

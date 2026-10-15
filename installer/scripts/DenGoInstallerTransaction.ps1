@@ -512,9 +512,10 @@ function DgTx-ItemFields {
 
 # ---------------------------------------------------------------- Begin
 function DgTx-Begin {
-    param([string]$StateRoot,[string]$BackupRoot,[string]$Operation,[object[]]$Items,[object]$Policy,[string]$NewStatePath)
+    param([string]$StateRoot,[string]$BackupRoot,[string]$Operation,[object[]]$Items,[object]$Policy,[string]$NewStatePath,[switch]$AllowEmptyTransaction)
     if (-not (DgEq $Operation 'Install') -and -not (DgEq $Operation 'Uninstall')) { throw (DgError 'PlanInvalid' 'Operation must be Install or Uninstall.') }
-    if (@($Items).Count -eq 0) { throw (DgError 'PlanInvalid' 'No items.') }
+    # A transaction without items is refused unless the caller asks for it explicitly (I2-B: a state-only commit).
+    if (@($Items).Count -eq 0 -and -not $AllowEmptyTransaction) { throw (DgError 'PlanInvalid' 'No items.') }
     $infra = @{}
     foreach ($pair in @(@('StateRoot',$StateRoot),@('BackupRoot',$BackupRoot),@('NewStatePath',$NewStatePath))) {
         $t = DgPolicy-TestPath $Policy $pair[1]
@@ -922,11 +923,12 @@ function DgTx-ExecuteRecovery {
             try { DgJournal-Close $Ctx.Journal } catch {}
             $Ctx.Journal = $null
         }
+        $reportPath = ''
         if ($manual) {
             $repPf = @{ TxnId = $Ctx.TxnId; Operation = $Ctx.Operation; Reasons = @($why); Summary = $Pf.Summary }
-            [void](DgTx-WriteReport $repPf $Ctx.StateRoot $Ctx.BackupRoot 'RollbackIncomplete (manual check required)')
+            $reportPath = [string](DgTx-WriteReport $repPf $Ctx.StateRoot $Ctx.BackupRoot 'RollbackIncomplete (manual check required)')
         }
-        return @{ Outcome = 'RollbackIncomplete'; Error = $message; Code = $code; Reasons = [object[]]@($why); ManualCheckRequired = $manual }
+        return @{ Outcome = 'RollbackIncomplete'; Error = $message; Code = $code; Reasons = [object[]]@($why); ManualCheckRequired = $manual; ReportPath = $reportPath }
     }
 }
 function DgTx-WriteReport {
@@ -968,7 +970,7 @@ function DgTx-Rollback {
         return [pscustomobject]@{ Outcome = 'RollbackIncomplete'; Reasons = [object[]]@($why); TransactionId = $Ctx.TxnId; ReportPath = ''; Error = $why.Detail; ManualCheckRequired = ($c -eq 'JournalChangedAfterRead') }
     }
     $x = DgTx-ExecuteRecovery $pf $rc 'apply' $Reason
-    return [pscustomobject]@{ Outcome = $x.Outcome; Reasons = [object[]]@($x.Reasons); TransactionId = $Ctx.TxnId; ReportPath = ''; Error = $x.Error; ManualCheckRequired = [bool]$x.ManualCheckRequired }
+    return [pscustomobject]@{ Outcome = $x.Outcome; Reasons = [object[]]@($x.Reasons); TransactionId = $Ctx.TxnId; ReportPath = [string](DgProp $x 'ReportPath' ''); Error = $x.Error; ManualCheckRequired = [bool]$x.ManualCheckRequired }
 }
 function DgTx-Recover {
     param([string]$StateRoot,[string]$BackupRoot,[object]$Policy)
@@ -1003,7 +1005,7 @@ function DgTx-Recover {
         return [pscustomobject]@{ Outcome = 'RollbackIncomplete'; Reasons = [object[]]@($why); TransactionId = $pf.TxnId; Operation = $pf.Operation; Region = $pf.Region; ReportPath = ''; Error = $why.Detail; CleanupRefused = [string[]]@(); ManualCheckRequired = ($c -eq 'JournalChangedAfterRead') }
     }
     $x = DgTx-ExecuteRecovery $pf $ctx 'recovery' 'Recovery'
-    return [pscustomobject]@{ Outcome = $x.Outcome; Reasons = [object[]]@($x.Reasons); TransactionId = $pf.TxnId; Operation = $pf.Operation; Region = $pf.Region; ReportPath = ''; Error = $x.Error; CleanupRefused = [string[]]@(); ManualCheckRequired = [bool]$x.ManualCheckRequired }
+    return [pscustomobject]@{ Outcome = $x.Outcome; Reasons = [object[]]@($x.Reasons); TransactionId = $pf.TxnId; Operation = $pf.Operation; Region = $pf.Region; ReportPath = [string](DgProp $x 'ReportPath' ''); Error = $x.Error; CleanupRefused = [string[]]@(); ManualCheckRequired = [bool]$x.ManualCheckRequired }
 }
 # Removes the two fixed-name orphan marker temporaries - and nothing else - after every safety condition holds.
 # Returns @{ Deleted = names; Refused = "name: reason" } ; a refused target is never touched.
@@ -1053,8 +1055,8 @@ function DgTx-Commit {
     DgTx-Finalize $Ctx 'committed'
 }
 function DgTx-Run {
-    param([string]$StateRoot,[string]$BackupRoot,[string]$Operation,[object[]]$Items,[object]$Policy,[string]$NewStatePath,[byte[]]$NewStateBytes = $null,[scriptblock]$NewStateFactory = $null,[string]$LockName = '',[string]$LockSecurity = 'Explicit')
-    $result = [pscustomobject]@{ Succeeded = $false; Code = ''; Message = ''; TransactionId = ''; RollbackState = 'NotStarted'; FailedItem = -1; Reasons = [object[]]@(); ManualCheckRequired = $false }
+    param([string]$StateRoot,[string]$BackupRoot,[string]$Operation,[object[]]$Items,[object]$Policy,[string]$NewStatePath,[byte[]]$NewStateBytes = $null,[scriptblock]$NewStateFactory = $null,[string]$LockName = '',[string]$LockSecurity = 'Explicit',[switch]$AllowEmptyTransaction)
+    $result = [pscustomobject]@{ Succeeded = $false; Code = ''; Message = ''; TransactionId = ''; RollbackState = 'NotStarted'; FailedItem = -1; Reasons = [object[]]@(); ManualCheckRequired = $false; ReportPath = '' }
     $lockHeld = $false
     if ($LockName.Length -gt 0) {
         $l = DgLock-TryAcquire $LockName $LockSecurity
@@ -1064,7 +1066,9 @@ function DgTx-Run {
     $ctx = $null
     try {
         try {
-            $ctx = DgTx-Begin $StateRoot $BackupRoot $Operation $Items $Policy $NewStatePath
+            # An empty transaction must still commit a new state through the factory; state bytes alone are not accepted.
+            if (@($Items).Count -eq 0 -and $AllowEmptyTransaction -and $null -eq $NewStateFactory) { throw (DgError 'PlanInvalid' 'An empty transaction requires NewStateFactory.') }
+            $ctx = DgTx-Begin $StateRoot $BackupRoot $Operation $Items $Policy $NewStatePath -AllowEmptyTransaction:$AllowEmptyTransaction
             $result.TransactionId = $ctx.TxnId
             DgTx-Apply $ctx
             $bytes = $NewStateBytes
@@ -1087,6 +1091,7 @@ function DgTx-Run {
                     $result.RollbackState = $rb.Outcome
                     $result.Reasons = [object[]]@($rb.Reasons)
                     $result.ManualCheckRequired = (($rb.Outcome -eq 'RepairRequired') -or [bool](DgProp $rb 'ManualCheckRequired' $false))
+                    $result.ReportPath = [string](DgProp $rb 'ReportPath' '')
                     if ($rb.Outcome -eq 'RolledForward') { $result.Succeeded = $true; $result.Code = 'OK'; $result.Message = ('Committed (rolled forward after: ' + $code + ')') }
                 } elseif ($ctx.StateCommitted) {
                     $result.Succeeded = $true; $result.Code = 'OK'; $result.RollbackState = 'NotNeeded'; $result.Message = 'Committed; post-commit cleanup incomplete.'

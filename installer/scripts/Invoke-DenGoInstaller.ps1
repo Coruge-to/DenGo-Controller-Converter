@@ -16,6 +16,8 @@
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2.0
+. (Join-Path $PSScriptRoot 'DenGoInstallerTransaction.ps1')
+. (Join-Path $PSScriptRoot 'DenGoInstallerProductApply.ps1')
 
 if ($DryRun -and $Apply) {
     throw 'Specify either -DryRun or -Apply, not both.'
@@ -45,15 +47,6 @@ $assets = Join-Path $installerRoot 'assets\input-profiles'
 $installerStateRoot = Join-Path $env:LOCALAPPDATA 'DenGo Controller Converter\InstallerState'
 $installMarker = Join-Path $installerStateRoot 'installing.json'
 $installedStatePath = Join-Path $installerStateRoot 'installed-state.json'
-$legacyKeyboardInitialized = $false
-if ([System.IO.File]::Exists($installedStatePath)) {
-    try {
-        $previousInstalledState = [System.IO.File]::ReadAllText($installedStatePath,[System.Text.Encoding]::UTF8) | ConvertFrom-Json
-        if ($null -ne $previousInstalledState.PSObject.Properties['PCSX2LegacyKeyboardInitialized']) { $legacyKeyboardInitialized = [bool]$previousInstalledState.PCSX2LegacyKeyboardInitialized }
-    } catch {
-        $legacyKeyboardInitialized = $false
-    }
-}
 $interruptedInstallDetected = [System.IO.File]::Exists($installMarker)
 if ([string]::IsNullOrWhiteSpace($OutputRoot)) {
     $outputRoot = Join-Path $env:TEMP 'DenGoInstallerPreview'
@@ -271,42 +264,16 @@ function Invoke-SandboxApply {
     }
     return [object[]]@($results)
 }
-function Invoke-DesktopShortcut {
-    param([string]$ApplicationPath,[string]$ShortcutPathOverride)
-    $shortcutPath = ''
-    try {
-        if (-not [System.IO.File]::Exists($ApplicationPath)) { throw 'Installed application was not found.' }
-        if ([string]::IsNullOrWhiteSpace($ShortcutPathOverride)) {
-            $desktop = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::Desktop)
-            $shortcutPath = Join-Path $desktop 'DenGo Controller Converter.lnk'
-        } else {
-            $shortcutPath = [System.IO.Path]::GetFullPath($ShortcutPathOverride)
-            $tempPrefix = [System.IO.Path]::GetFullPath($env:TEMP).TrimEnd([char[]]@([char]92,[char]47)) + [System.IO.Path]::DirectorySeparatorChar
-            $desktopPrefix = [System.IO.Path]::GetFullPath([System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::Desktop)).TrimEnd([char[]]@([char]92,[char]47)) + [System.IO.Path]::DirectorySeparatorChar
-            if (-not $shortcutPath.StartsWith($tempPrefix,[System.StringComparison]::OrdinalIgnoreCase) -and -not $shortcutPath.StartsWith($desktopPrefix,[System.StringComparison]::OrdinalIgnoreCase)) { throw 'ShortcutPathOverride must be under TEMP or the current user Desktop.' }
-        }
-        $parent = [System.IO.Path]::GetDirectoryName($shortcutPath)
-        [System.IO.Directory]::CreateDirectory($parent) | Out-Null
-        $shell = New-Object -ComObject WScript.Shell
-        $shortcut = $shell.CreateShortcut($shortcutPath)
-        $shortcut.TargetPath = $ApplicationPath
-        $shortcut.WorkingDirectory = [System.IO.Path]::GetDirectoryName($ApplicationPath)
-        $iconPath = Join-Path ([System.IO.Path]::GetDirectoryName($ApplicationPath)) 'DenGo-Controller-Converter.ico'
-        if (-not [System.IO.File]::Exists($iconPath)) { throw 'Installed shortcut icon was not found.' }
-        $shortcut.IconLocation = $iconPath + ',0'
-        $shortcut.Save()
-        if (-not [System.IO.File]::Exists($shortcutPath)) { throw 'Shortcut file was not created.' }
-        $verify = $shell.CreateShortcut($shortcutPath)
-        if (-not [string]::Equals([System.IO.Path]::GetFullPath([string]$verify.TargetPath),[System.IO.Path]::GetFullPath($ApplicationPath),[System.StringComparison]::OrdinalIgnoreCase)) { throw 'Shortcut target verification failed.' }
-        if (-not [string]::Equals([System.IO.Path]::GetFullPath([string]$verify.WorkingDirectory),[System.IO.Path]::GetFullPath([System.IO.Path]::GetDirectoryName($ApplicationPath)),[System.StringComparison]::OrdinalIgnoreCase)) { throw 'Shortcut working directory verification failed.' }
-        $verifyIconPath = ([string]$verify.IconLocation).Split(',')[0]
-        if (-not [string]::Equals([System.IO.Path]::GetFullPath($verifyIconPath),[System.IO.Path]::GetFullPath($iconPath),[System.StringComparison]::OrdinalIgnoreCase)) { throw 'Shortcut icon verification failed.' }
-        return [pscustomobject]@{Requested=$true;Created=$true;Path=$shortcutPath;Error=''}
-    } catch {
-        return [pscustomobject]@{Requested=$true;Created=$false;Path=$shortcutPath;Error=[string]$_.Exception.Message}
-    }
+function Resolve-DesktopShortcutPath {
+    param([string]$ShortcutPathOverride)
+    $desktop = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::Desktop)
+    if ([string]::IsNullOrWhiteSpace($ShortcutPathOverride)) { return (Join-Path $desktop 'DenGo Controller Converter.lnk') }
+    $shortcutPath = [System.IO.Path]::GetFullPath($ShortcutPathOverride)
+    $tempPrefix = [System.IO.Path]::GetFullPath($env:TEMP).TrimEnd([char[]]@([char]92,[char]47)) + [System.IO.Path]::DirectorySeparatorChar
+    $desktopPrefix = [System.IO.Path]::GetFullPath($desktop).TrimEnd([char[]]@([char]92,[char]47)) + [System.IO.Path]::DirectorySeparatorChar
+    if (-not $shortcutPath.StartsWith($tempPrefix,[System.StringComparison]::OrdinalIgnoreCase) -and -not $shortcutPath.StartsWith($desktopPrefix,[System.StringComparison]::OrdinalIgnoreCase)) { throw 'ShortcutPathOverride must be under TEMP or the current user Desktop.' }
+    return $shortcutPath
 }
-
 function Get-RunningTargetProducts {
     $running = @(Get-CimInstance Win32_Process | Where-Object {
         [string]::Equals([string]$_.Name,'BveTs.exe',[System.StringComparison]::OrdinalIgnoreCase) -or [string]::Equals([string]$_.Name,'rpcs3.exe',[System.StringComparison]::OrdinalIgnoreCase) -or [string]::Equals([string]$_.Name,'DenGoControllerConverter.exe',[System.StringComparison]::OrdinalIgnoreCase) -or [string]::Equals([string]$_.Name,'pcsx2-qt.exe',[System.StringComparison]::OrdinalIgnoreCase) -or [string]::Equals([string]$_.Name,'pcsx2.exe',[System.StringComparison]::OrdinalIgnoreCase)
@@ -323,195 +290,6 @@ function Assert-TargetProcessesStopped {
     $products=@(Get-RunningTargetProducts)
     if(@($products).Count-ne0){throw ("BlockedByRunningProcesses|RunningProducts={0}" -f ([string]::Join(',',[string[]]@($products))))}
 }
-function Restore-AppliedItems {
-    param([object[]]$AppliedItems)
-    foreach ($entry in @($AppliedItems | Sort-Object Sequence -Descending)) {
-        if ([bool]$entry.ExistedBefore) { [System.IO.File]::Copy([string]$entry.Backup,[string]$entry.Destination,$true) }
-        elseif ([System.IO.File]::Exists([string]$entry.Destination)) { [System.IO.File]::Delete([string]$entry.Destination) }
-    }
-}
-
-function Invoke-RealApplySet {
-    param([string]$SetName,[object[]]$Items,[string]$BackupRoot,[System.Collections.ArrayList]$Results)
-    $changed = New-Object System.Collections.ArrayList
-    $resultStart = @($Results).Count
-    try {
-        foreach ($item in @($Items)) {
-            $action = [string]$item.Action
-            if ([string]::Equals($action,'Unchanged',[System.StringComparison]::Ordinal) -or [string]::Equals($action,'PreserveUserModified',[System.StringComparison]::Ordinal) -or [string]::Equals($action,'NotInitialized',[System.StringComparison]::Ordinal)) {
-                [void]$Results.Add([pscustomobject]@{Set=$SetName;Platform=$item.Platform;Component=$item.Component;Action=$action;Destination=$item.Destination;Applied=$false;Backup='';Succeeded=$true;ErrorCode=''})
-                continue
-            }
-            if (-not [string]::Equals($action,'Add',[System.StringComparison]::Ordinal) -and -not [string]::Equals($action,'UpdateOrRepair',[System.StringComparison]::Ordinal)) { throw ("Unsupported Apply action: {0}" -f $action) }
-            $existedBefore = [System.IO.File]::Exists([string]$item.Destination)
-            $backup = Copy-VerifiedFile ([string]$item.Source) ([string]$item.Destination) $BackupRoot
-            [void]$changed.Add([pscustomobject]@{Sequence=@($changed).Count;Destination=[string]$item.Destination;ExistedBefore=$existedBefore;Backup=$backup})
-            [void]$Results.Add([pscustomobject]@{Set=$SetName;Platform=$item.Platform;Component=$item.Component;Action=$action;Destination=$item.Destination;Applied=$true;Backup=$backup;Succeeded=$true;ErrorCode=''})
-        }
-    } catch {
-        $originalMessage = [string]$_.Exception.Message
-        $rollbackAttempted = @($changed).Count -ne 0
-        $rollbackSucceeded = $true
-        $rollbackMessage = ''
-        try { Restore-AppliedItems ([object[]]@($changed)) } catch { $rollbackSucceeded=$false;$rollbackMessage=[string]$_.Exception.Message }
-        while (@($Results).Count -gt $resultStart) { $Results.RemoveAt(@($Results).Count - 1) }
-        [void]$Results.Add([pscustomobject]@{Set=$SetName;Platform=$SetName;Component='Set';Action='Failed';Destination='';Applied=$false;Backup='';Succeeded=$false;ErrorCode='SetApplyFailed';ErrorMessage=$originalMessage;RollbackAttempted=$rollbackAttempted;RollbackSucceeded=$rollbackSucceeded;RollbackError=$rollbackMessage})
-        $failure = New-Object System.Exception(('Set Apply failed: ' + $SetName),$_.Exception)
-        $failure.Data['FailedSet']=$SetName
-        $failure.Data['RollbackAttempted']=$rollbackAttempted
-        $failure.Data['RollbackSucceeded']=$rollbackSucceeded
-        $failure.Data['RollbackError']=$rollbackMessage
-        throw $failure
-    }
-}
-
-function Remove-InstallerTemporaryFiles {
-    param([object[]]$Plan)
-    foreach ($item in @($Plan)) {
-        $temporary = ([string]$item.Destination) + '.dengo.tmp'
-        if ([System.IO.File]::Exists($temporary)) { [System.IO.File]::Delete($temporary) }
-    }
-}
-function Write-InstallMarker {
-    [System.IO.Directory]::CreateDirectory($installerStateRoot) | Out-Null
-    $state = [pscustomobject][ordered]@{SchemaVersion=1;ProductVersion='2.0.0';State='Installing';Started=[System.DateTimeOffset]::Now.ToString('o')}
-    [System.IO.File]::WriteAllText($installMarker,($state | ConvertTo-Json -Depth 3),(New-Object System.Text.UTF8Encoding($true)))
-}
-function Write-InstalledState {
-    param([object[]]$Plan,[object[]]$ApplyResults,[string]$BackupRoot,[bool]$ShortcutRequested,[bool]$ShortcutCreated,[string]$ShortcutPath)
-    [System.IO.Directory]::CreateDirectory($installerStateRoot) | Out-Null
-    $statePath = Join-Path $installerStateRoot 'installed-state.json'
-    $previous = $null
-    if ([System.IO.File]::Exists($statePath)) {
-        try { $previous = [System.IO.File]::ReadAllText($statePath,[System.Text.Encoding]::UTF8) | ConvertFrom-Json } catch { $previous = $null }
-    }
-    $files = New-Object System.Collections.ArrayList
-    foreach ($item in @($Plan)) {
-        $destination = [string]$item.Destination
-        $apply = @($ApplyResults | Where-Object {
-            [string]::Equals([string]$_.Platform,[string]$item.Platform,[System.StringComparison]::Ordinal) -and
-            [string]::Equals([string]$_.Component,[string]$item.Component,[System.StringComparison]::Ordinal) -and
-            [string]::Equals([string]$_.Destination,$destination,[System.StringComparison]::OrdinalIgnoreCase)
-        })
-        $action = [string]$item.Action
-        $backup = ''
-        if (@($apply).Count -eq 1) { $backup = [string]$apply[0].Backup }
-        $ownership = 'NotManaged'
-        $existedBefore = $false
-        $beforeSha = ''
-        if ([string]::Equals($action,'Add',[System.StringComparison]::Ordinal)) {
-            $ownership = 'CreatedByInstaller'
-        } elseif ([string]::Equals($action,'UpdateOrRepair',[System.StringComparison]::Ordinal)) {
-            $previousItems = @()
-            if ($null -ne $previous -and $null -ne $previous.Files) {
-                $previousItems = @($previous.Files | Where-Object { [string]::Equals([string]$_.Destination,$destination,[System.StringComparison]::OrdinalIgnoreCase) })
-            }
-            if (@($previousItems).Count -eq 1) {
-                $previousOwnership = [string]$previousItems[0].Ownership
-                if ([string]::Equals($previousOwnership,'ReplacedExisting',[System.StringComparison]::Ordinal) -and -not ([string]::Equals([string]$item.Component,'InputProfile',[System.StringComparison]::Ordinal) -or [string]::Equals([string]$item.Component,'EffectiveInputProfile',[System.StringComparison]::Ordinal))) {
-                    $ownership = 'MigratedMatchingDenGoFile'
-                    $existedBefore = $false
-                    $beforeSha = ''
-                    $backup = ''
-                } else {
-                    $ownership = $previousOwnership
-                    $existedBefore = [bool]$previousItems[0].ExistedBefore
-                    $beforeSha = [string]$previousItems[0].BeforeSHA256
-                    $backup = [string]$previousItems[0].Backup
-                }
-            } elseif ([string]::Equals([string]$item.Component,'InputProfile',[System.StringComparison]::Ordinal) -or [string]::Equals([string]$item.Component,'EffectiveInputProfile',[System.StringComparison]::Ordinal)) {
-                $ownership = 'ReplacedExisting'
-                $existedBefore = -not [string]::IsNullOrWhiteSpace($backup)
-                if ($existedBefore -and [System.IO.File]::Exists($backup)) { $beforeSha = Get-Sha256 $backup }
-            } else {
-                $ownership = 'MigratedMatchingDenGoFile'
-                $existedBefore = $false
-                $beforeSha = ''
-                $backup = ''
-            }
-        } elseif ([string]::Equals($action,'Unchanged',[System.StringComparison]::Ordinal)) {
-            $previousItems = @()
-            if ($null -ne $previous -and $null -ne $previous.Files) {
-                $previousItems = @($previous.Files | Where-Object { [string]::Equals([string]$_.Destination,$destination,[System.StringComparison]::OrdinalIgnoreCase) })
-            }
-            if (@($previousItems).Count -eq 1) {
-                $previousOwnership = [string]$previousItems[0].Ownership
-                if ([string]::Equals($previousOwnership,'ReplacedExisting',[System.StringComparison]::Ordinal) -and -not ([string]::Equals([string]$item.Component,'InputProfile',[System.StringComparison]::Ordinal) -or [string]::Equals([string]$item.Component,'EffectiveInputProfile',[System.StringComparison]::Ordinal))) {
-                    $ownership = 'MigratedMatchingDenGoFile'
-                    $existedBefore = $false
-                    $beforeSha = ''
-                    $backup = ''
-                } else {
-                    $ownership = $previousOwnership
-                    $existedBefore = [bool]$previousItems[0].ExistedBefore
-                    $beforeSha = [string]$previousItems[0].BeforeSHA256
-                    $backup = [string]$previousItems[0].Backup
-                }
-            } else {
-                $ownership = 'MigratedMatchingDenGoFile'
-            }
-        } elseif ([string]::Equals($action,'PreserveUserModified',[System.StringComparison]::Ordinal)) {
-            $ownership = 'PreservedUserFile'
-        } elseif ([string]::Equals($action,'NotInitialized',[System.StringComparison]::Ordinal)) {
-            $ownership = 'NotInstalled'
-        }
-        $afterSha = ''
-        if ([System.IO.File]::Exists($destination)) { $afterSha = Get-Sha256 $destination }
-        [void]$files.Add([pscustomobject][ordered]@{
-            Platform=[string]$item.Platform
-            Component=[string]$item.Component
-            Destination=$destination
-            InstallAction=$action
-            Ownership=$ownership
-            ExistedBefore=$existedBefore
-            BeforeSHA256=$beforeSha
-            AfterSHA256=$afterSha
-            Backup=$backup
-        })
-    }
-    $state = [pscustomobject][ordered]@{
-        SchemaVersion=1
-        ProductVersion='2.0.0'
-        PCSX2LegacyKeyboardInitialized=([bool]$legacyKeyboardInitialized -or [bool]$ReplaceModifiedPCSX2Profile)
-        InstalledAt=[System.DateTimeOffset]::Now.ToString('o')
-        BackupRoot=$BackupRoot
-        Shortcut=[pscustomobject][ordered]@{Requested=$ShortcutRequested;Created=$ShortcutCreated;Path=$ShortcutPath}
-        Files=[object[]]@($files)
-    }
-    $temporary = $statePath + '.tmp'
-    [System.IO.File]::WriteAllText($temporary,($state | ConvertTo-Json -Depth 7),(New-Object System.Text.UTF8Encoding($true)))
-    $verification = [System.IO.File]::ReadAllText($temporary,[System.Text.Encoding]::UTF8) | ConvertFrom-Json
-    if ([int]$verification.SchemaVersion -ne 1) { throw 'Installed-state verification failed.' }
-    [System.IO.File]::Copy($temporary,$statePath,$true)
-    [System.IO.File]::Delete($temporary)
-    return $statePath
-}
-function Invoke-RealApply {
-    param([object[]]$Plan,[string]$BackupRootOverride)
-    Assert-TargetProcessesStopped
-    if ([string]::IsNullOrWhiteSpace($BackupRootOverride)) {
-        $backupBase = Join-Path $env:LOCALAPPDATA 'DenGo Controller Converter\InstallerBackups'
-        $backupRoot = Join-Path $backupBase ([System.DateTime]::Now.ToString('yyyyMMdd-HHmmss'))
-    } else {
-        $backupRoot = [System.IO.Path]::GetFullPath($BackupRootOverride)
-        $tempPrefix = [System.IO.Path]::GetFullPath($env:TEMP).TrimEnd([char[]]@([char]92,[char]47)) + [System.IO.Path]::DirectorySeparatorChar
-        $localPrefix = [System.IO.Path]::GetFullPath($env:LOCALAPPDATA).TrimEnd([char[]]@([char]92,[char]47)) + [System.IO.Path]::DirectorySeparatorChar
-        if (-not $backupRoot.StartsWith($tempPrefix,[System.StringComparison]::OrdinalIgnoreCase) -and -not $backupRoot.StartsWith($localPrefix,[System.StringComparison]::OrdinalIgnoreCase)) { throw 'BackupRootOverride must be under TEMP or LOCALAPPDATA.' }
-    }
-    [System.IO.Directory]::CreateDirectory($backupRoot) | Out-Null
-    $results = New-Object System.Collections.ArrayList
-    $succeeded=$true;$errorCode='';$errorMessage='';$failedSet='';$rollbackAttempted=$false;$rollbackSucceeded=$true;$rollbackError=''
-    $setNames = @('Core','BVE5','BVE6','BveEX Current','AtsEX Legacy','PCSX2','RPCS3')
-    foreach ($setName in $setNames) {
-        $items = @($Plan | Where-Object { [string]::Equals([string]$_.Platform,$setName,[System.StringComparison]::Ordinal) })
-        if (@($items).Count -eq 0) { continue }
-        try { Invoke-RealApplySet $setName ([object[]]@($items)) $backupRoot $results } catch {
-            $succeeded=$false;$errorCode='SetApplyFailed';$errorMessage=[string]$_.Exception.InnerException.Message;$failedSet=[string]$_.Exception.Data['FailedSet'];$rollbackAttempted=[bool]$_.Exception.Data['RollbackAttempted'];$rollbackSucceeded=[bool]$_.Exception.Data['RollbackSucceeded'];$rollbackError=[string]$_.Exception.Data['RollbackError'];break
-        }
-    }
-    return [pscustomobject]@{Succeeded=$succeeded;ErrorCode=$errorCode;ErrorMessage=$errorMessage;FailedSet=$failedSet;RollbackAttempted=$rollbackAttempted;RollbackSucceeded=$rollbackSucceeded;RollbackError=$rollbackError;BackupRoot=$backupRoot;Results=[object[]]@($results)}
-}
-
 function Get-LilyPadDeviceSection {
     param([string[]]$Lines,[string]$DisplayName)
     $result = New-Object System.Collections.ArrayList
@@ -789,38 +567,41 @@ $shortcutCreated = $false
 $shortcutPath = ''
 $shortcutError = ''
 $succeeded=$true;$errorCode='';$errorMessage='';$failedSet='';$rollbackAttempted=$false;$rollbackSucceeded=$true;$rollbackError=''
+$transactionInfo = $null;$recoveryInfo = $null;$deferredItems = [object[]]@()
 if ($Apply -and $RealSystem) {
-    Remove-InstallerTemporaryFiles ([object[]]@($plan))
-    Assert-TargetProcessesStopped
-    Write-InstallMarker
-    $realApplyResult = Invoke-RealApply ([object[]]@($plan)) $BackupRootOverride
-    $applyResults = [object[]]@($realApplyResult.Results)
-    $backupRoot = [string]$realApplyResult.BackupRoot
-    $succeeded=[bool]$realApplyResult.Succeeded;$errorCode=[string]$realApplyResult.ErrorCode;$errorMessage=[string]$realApplyResult.ErrorMessage;$failedSet=[string]$realApplyResult.FailedSet;$rollbackAttempted=[bool]$realApplyResult.RollbackAttempted;$rollbackSucceeded=[bool]$realApplyResult.RollbackSucceeded;$rollbackError=[string]$realApplyResult.RollbackError
-    if ($CreateDesktopShortcut) {
-        if ($succeeded) {
-            $applicationPlan = @($plan | Where-Object { [string]::Equals([string]$_.Platform,'Core',[System.StringComparison]::Ordinal) -and [string]::Equals([string]$_.Component,'Application',[System.StringComparison]::Ordinal) })
-            if (@($applicationPlan).Count -eq 1) {
-                $shortcutResult = Invoke-DesktopShortcut ([string]$applicationPlan[0].Destination) $ShortcutPathOverride
-                $shortcutCreated=[bool]$shortcutResult.Created;$shortcutPath=[string]$shortcutResult.Path;$shortcutError=[string]$shortcutResult.Error
-            } else { $shortcutError='Core application plan was not unique.' }
-        } else { $shortcutError='Shortcut was not created because Real Apply did not succeed.' }
+    # I2-B: one all-or-nothing transaction for every Set (see DenGoInstallerProductApply.ps1). PCSX2 / LilyPad stay out until I3.
+    $resolvedShortcutPath = '';$shortcutResolveError = ''
+    if ($CreateDesktopShortcut) { try { $resolvedShortcutPath = Resolve-DesktopShortcutPath $ShortcutPathOverride } catch { $shortcutResolveError = [string]$_.Exception.Message } }
+    $backupBaseOverride = ''
+    if (-not [string]::IsNullOrWhiteSpace($BackupRootOverride)) {
+        $backupBaseOverride = [System.IO.Path]::GetFullPath($BackupRootOverride)
+        $tempPrefix = [System.IO.Path]::GetFullPath($env:TEMP).TrimEnd([char[]]@([char]92,[char]47)) + [System.IO.Path]::DirectorySeparatorChar
+        $localPrefix = [System.IO.Path]::GetFullPath($env:LOCALAPPDATA).TrimEnd([char[]]@([char]92,[char]47)) + [System.IO.Path]::DirectorySeparatorChar
+        if (-not $backupBaseOverride.StartsWith($tempPrefix,[System.StringComparison]::OrdinalIgnoreCase) -and -not $backupBaseOverride.StartsWith($localPrefix,[System.StringComparison]::OrdinalIgnoreCase)) { throw 'BackupRootOverride must be under TEMP or LOCALAPPDATA.' }
     }
-    if ($succeeded) {
-        try {
-            [void](Write-InstalledState ([object[]]@($plan)) ([object[]]@($applyResults)) $backupRoot $shortcutRequested $shortcutCreated $shortcutPath)
-        } catch {
-            $succeeded=$false
-            $errorCode='InstalledStateWriteFailed'
-            $errorMessage=[string]$_.Exception.Message
-            $failedSet='InstallerState'
-        }
-    }
-    if ($succeeded -and [System.IO.File]::Exists($installMarker)) { [System.IO.File]::Delete($installMarker) }
+    $productLayout = Get-DenGoProductLayout -LocalAppData $env:LOCALAPPDATA -PublicRoot 'C:\Users\Public' -ShortcutPath $resolvedShortcutPath -BackupRoot $backupBaseOverride
+    $productOptions = @{ ShortcutRequested = [bool]$CreateDesktopShortcut; ProcessGate = { Assert-TargetProcessesStopped }; StageParent = $env:TEMP }
+    $productResult = Invoke-DenGoProductInstall -Layout $productLayout -Plan ([object[]]@($plan)) -Options $productOptions
+    $applyResults = [object[]]@($productResult.Results)
+    $backupRoot = [string]$productResult.BackupRoot
+    $succeeded=[bool]$productResult.Succeeded;$errorCode=[string]$productResult.ErrorCode;$errorMessage=[string]$productResult.ErrorMessage;$failedSet=[string]$productResult.FailedSet;$rollbackAttempted=[bool]$productResult.RollbackAttempted;$rollbackSucceeded=[bool]$productResult.RollbackSucceeded;$rollbackError=[string]$productResult.RollbackError
+    $shortcutCreated=[bool]$productResult.ShortcutCreated;$shortcutPath=[string]$productResult.ShortcutPath;$shortcutError=[string]$productResult.ShortcutError
+    if ($shortcutError.Length -eq 0 -and $shortcutResolveError.Length -gt 0) { $shortcutError = $shortcutResolveError }
+    $transactionInfo = [pscustomobject]@{TransactionId=[string]$productResult.TransactionId;Code=[string]$productResult.TransactionCode;RollbackState=[string]$productResult.RollbackState;ManualCheckRequired=[bool]$productResult.ManualCheckRequired;Reasons=[object[]]@($productResult.Reasons);ReportPath=[string]$productResult.ReportPath;LockAcquired=[bool]$productResult.LockAcquired;StateCommitted=[bool]$productResult.StateCommitted;RecoveryOutcome=[string]$productResult.RecoveryOutcome;FailedItem=[int]$productResult.FailedItem}
+    $recoveryInfo = $productResult.Recovery
+    $deferredItems = [object[]]@($productResult.DeferredItems)
 } elseif ($Apply) {
     $applyResults = Invoke-SandboxApply ([object[]]@($plan)) $TestRoot
+} elseif ($DryRun) {
+    # read-only report of an interrupted install (nothing is recovered, locked or written in a dry run)
+    try {
+        $dryLayout = Get-DenGoProductLayout -LocalAppData $env:LOCALAPPDATA
+        $recoveryInfo = Get-DenGoRecoveryGate -Layout $dryLayout -Mode 'DryRun'
+    } catch {
+        $recoveryInfo = [pscustomobject]@{Proceed=$true;Outcome='Unknown';ErrorCode='';Detail=[string]$_.Exception.Message;Reasons=[object[]]@();Region='';TransactionId='';ReportPath='';ManualCheckRequired=$false}
+    }
 }
-$result=[pscustomobject]@{SchemaVersion=9;Generated=[System.DateTimeOffset]::Now.ToString('o');InterruptedInstallDetected=$interruptedInstallDetected;Succeeded=$succeeded;ErrorCode=$errorCode;ErrorMessage=$errorMessage;FailedSet=$failedSet;RollbackAttempted=$rollbackAttempted;RollbackSucceeded=$rollbackSucceeded;RollbackError=$rollbackError;ShortcutRequested=$shortcutRequested;ShortcutCreated=$shortcutCreated;ShortcutPath=$shortcutPath;ShortcutError=$shortcutError;DryRun=[bool]$DryRun;Apply=[bool]$Apply;RealSystem=[bool]$RealSystem;AdditionalSearch=[bool]$AdditionalSearch;BveExCurrentInstalled=[bool]$bveExCurrentInstalled;BveExLegacyInstalled=[bool]$bveExLegacyInstalled;BveIntegrationSkipped=[bool]$SkipBveIntegration;TestRoot=$TestRoot;OutputRoot=$outputRoot;BackupRoot=$backupRoot;ReplacementDecisions=[pscustomobject]@{PCSX2=[bool]$ReplaceModifiedPCSX2Profile;RPCS3=[bool]$ReplaceModifiedRPCS3Profile};Detected=[object[]]@($detected);Plan=[object[]]@($plan);ApplyResults=[object[]]@($applyResults)}
+$result=[pscustomobject]@{SchemaVersion=9;Generated=[System.DateTimeOffset]::Now.ToString('o');InterruptedInstallDetected=$interruptedInstallDetected;Succeeded=$succeeded;ErrorCode=$errorCode;ErrorMessage=$errorMessage;FailedSet=$failedSet;RollbackAttempted=$rollbackAttempted;RollbackSucceeded=$rollbackSucceeded;RollbackError=$rollbackError;ShortcutRequested=$shortcutRequested;ShortcutCreated=$shortcutCreated;ShortcutPath=$shortcutPath;ShortcutError=$shortcutError;DryRun=[bool]$DryRun;Apply=[bool]$Apply;RealSystem=[bool]$RealSystem;AdditionalSearch=[bool]$AdditionalSearch;BveExCurrentInstalled=[bool]$bveExCurrentInstalled;BveExLegacyInstalled=[bool]$bveExLegacyInstalled;BveIntegrationSkipped=[bool]$SkipBveIntegration;TestRoot=$TestRoot;OutputRoot=$outputRoot;BackupRoot=$backupRoot;ReplacementDecisions=[pscustomobject]@{PCSX2=[bool]$ReplaceModifiedPCSX2Profile;RPCS3=[bool]$ReplaceModifiedRPCS3Profile};Detected=[object[]]@($detected);Plan=[object[]]@($plan);ApplyResults=[object[]]@($applyResults);Transaction=$transactionInfo;Recovery=$recoveryInfo;DeferredItems=[object[]]@($deferredItems)}
 [System.IO.File]::WriteAllText($jsonOutput,($result | ConvertTo-Json -Depth 9),(New-Object System.Text.UTF8Encoding($true)))
 $lines=New-Object System.Collections.ArrayList
 [void]$lines.Add('DenGo installer formal preview plan')
