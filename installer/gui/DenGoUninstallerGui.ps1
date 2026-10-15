@@ -1,7 +1,9 @@
 ﻿param(
     [switch]$Preview,
     [ValidateSet('Auto','Both','PCSX2','RPCS3','None')]
-    [string]$PreviewProfiles = 'Auto'
+    [string]$PreviewProfiles = 'Auto',
+    [string]$ResultPath = '',
+    [string]$RunId = ''
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2.0
@@ -57,6 +59,13 @@ $script:allowClose = $false
 $script:barX = 1
 $script:barStep = 7
 $script:previewTimer = $null
+$script:finalResult = 'Failed'
+$script:finalReason = 'NotCompleted'
+$script:applyRunning = $false
+$script:engineStarted = $false
+$script:engineCompleted = $false
+$script:stateCommitted = $false
+$script:applyStartedAt = [System.DateTimeOffset]::MinValue
 
 $form = New-Object System.Windows.Forms.Form
 $form.Text = 'DenGo Controller Converter アンインストール'
@@ -279,6 +288,91 @@ function Join-NativeArguments {
     return [string]::Join(' ',[string[]]@($parts))
 }
 
+# --- I1 result contract: Completed (exit 0) / Cancelled (exit 2) / Failed (exit 1) ---
+function Show-GuiError {
+    param([string]$Text)
+    [void][System.Windows.Forms.MessageBox]::Show($Text,[regex]::Unescape('DenGo \u30A2\u30F3\u30A4\u30F3\u30B9\u30C8\u30FC\u30EB'),[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Error)
+}
+function Set-RunFailed {
+    param([string]$Reason)
+    $script:engineCompleted = $false
+    $script:stateCommitted = $false
+    $script:finalResult = 'Failed'
+    $script:finalReason = $Reason
+}
+function Set-RunCompleted {
+    $script:finalResult = 'Completed'
+    $script:finalReason = 'Completed'
+    $script:engineCompleted = $true
+    $script:stateCommitted = $true
+}
+# Cancelled is reachable only through an explicit, confirmed pre-apply cancel; anything else stays Failed/NotCompleted.
+function Set-RunCancelled {
+    if ([string]::Equals($script:finalResult,'Failed',[System.StringComparison]::Ordinal) -and [string]::Equals($script:finalReason,'NotCompleted',[System.StringComparison]::Ordinal) -and -not $script:engineStarted) {
+        $script:finalResult = 'Cancelled'
+        $script:finalReason = 'UserCancelled'
+    }
+}
+function Invoke-UnhandledGuiException {
+    param([System.Exception]$Exception)
+    if (-not [string]::Equals($script:finalResult,'Completed',[System.StringComparison]::Ordinal) -and [string]::Equals($script:finalReason,'NotCompleted',[System.StringComparison]::Ordinal)) { Set-RunFailed 'UnhandledException' }
+    $detail = ''
+    if ($null -ne $Exception) { $detail = [System.Environment]::NewLine + [System.Environment]::NewLine + [string]$Exception.Message }
+    Show-GuiError ([regex]::Unescape('\u4E88\u671F\u3057\u306A\u3044\u30A8\u30E9\u30FC\u304C\u767A\u751F\u3057\u307E\u3057\u305F\u3002') + $detail)
+}
+function Test-UninstallCommitted {
+    param([object]$Result,[int]$ExitCode)
+    try {
+        if ($ExitCode -ne 0) { return $false }
+        if (-not [bool]$Result.Succeeded) { return $false }
+        if (-not [bool]$Result.Apply -or -not [bool]$Result.RealSystem) { return $false }
+        $statePath = Join-Path $env:LOCALAPPDATA 'DenGo Controller Converter\InstallerState\uninstalled-state.json'
+        if (-not [System.IO.File]::Exists($statePath)) { return $false }
+        $state = [System.IO.File]::ReadAllText($statePath,[System.Text.Encoding]::UTF8) | ConvertFrom-Json
+        if ([int]$state.SchemaVersion -ne 1) { return $false }
+        if (-not [string]::Equals([string]$state.State,'Uninstalled',[System.StringComparison]::Ordinal)) { return $false }
+        $uninstalledAt = [System.DateTimeOffset]::Parse([string]$state.UninstalledAt,[System.Globalization.CultureInfo]::InvariantCulture)
+        return ($uninstalledAt -ge $script:applyStartedAt)
+    } catch { return $false }
+}
+function Write-RunResult {
+    param([string]$Result,[string]$Reason,[int]$ExitCode)
+    if ([string]::IsNullOrWhiteSpace($ResultPath)) { return $true }
+    $temporary = $null
+    try {
+        if ([string]::IsNullOrWhiteSpace($RunId)) { return $false }
+        $final = [System.IO.Path]::GetFullPath($ResultPath)
+        $directory = [System.IO.Path]::GetDirectoryName($final)
+        if (-not [System.IO.Directory]::Exists($directory)) { return $false }
+        if ([System.IO.File]::Exists($final)) { return $false }
+        $temporary = $final + '.tmp'
+        $document = [ordered]@{schemaVersion=1;operation='Uninstall';runId=$RunId;result=$Result;reason=$Reason;exitCode=$ExitCode;engineStarted=[bool]$script:engineStarted;engineCompleted=[bool]$script:engineCompleted;stateCommitted=[bool]$script:stateCommitted;writtenAt=[System.DateTimeOffset]::Now.ToString('o')}
+        $bytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes(($document | ConvertTo-Json))
+        $stream = New-Object System.IO.FileStream($temporary,[System.IO.FileMode]::CreateNew,[System.IO.FileAccess]::Write,[System.IO.FileShare]::None)
+        try { $stream.Write($bytes,0,$bytes.Length);$stream.Flush($true) } finally { $stream.Dispose() }
+        $check = [System.IO.File]::ReadAllText($temporary,[System.Text.Encoding]::UTF8) | ConvertFrom-Json
+        if ([int]$check.schemaVersion -ne 1 -or -not [string]::Equals([string]$check.runId,$RunId,[System.StringComparison]::Ordinal) -or -not [string]::Equals([string]$check.result,$Result,[System.StringComparison]::Ordinal) -or [int]$check.exitCode -ne $ExitCode) { throw 'Result verification failed.' }
+        [System.IO.File]::Move($temporary,$final)
+        return $true
+    } catch {
+        try { if ($null -ne $temporary -and [System.IO.File]::Exists($temporary)) { [System.IO.File]::Delete($temporary) } } catch {}
+        return $false
+    }
+}
+function Complete-Run {
+    $result = $script:finalResult
+    $reason = $script:finalReason
+    $invariantOk = $true
+    if ([string]::Equals($result,'Completed',[System.StringComparison]::Ordinal)) { $invariantOk = [bool]($script:engineStarted -and $script:engineCompleted -and $script:stateCommitted) }
+    elseif ([string]::Equals($result,'Cancelled',[System.StringComparison]::Ordinal)) { $invariantOk = -not [bool]($script:engineStarted -or $script:engineCompleted -or $script:stateCommitted) }
+    if (-not $invariantOk) { $result = 'Failed';$reason = 'InvariantViolation' }
+    $exitCode = 1
+    if ([string]::Equals($result,'Completed',[System.StringComparison]::Ordinal)) { $exitCode = 0 }
+    elseif ([string]::Equals($result,'Cancelled',[System.StringComparison]::Ordinal)) { $exitCode = 2 }
+    if (-not (Write-RunResult $result $reason $exitCode)) { return 1 }
+    return $exitCode
+}
+
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = 35
 $timer.Add_Tick({
@@ -289,34 +383,50 @@ $timer.Add_Tick({
     $block.Left = $script:barX
     if ($null -eq $script:process -or -not $script:process.HasExited) { return }
     $timer.Stop()
+    $script:applyRunning = $false
     $exitCode = $script:process.ExitCode
     $script:process.Dispose()
     $script:process = $null
     $resultPath = Join-Path $script:outputRoot 'uninstall-plan.json'
     if (-not [System.IO.File]::Exists($resultPath)) {
         [System.Windows.Forms.MessageBox]::Show(('アンインストール結果を確認できませんでした。 終了コード: ' + $exitCode),'DenGo アンインストール',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
+        Set-RunFailed 'EngineNoResult'
         Set-Page 'start'
         return
     }
-    $result = [System.IO.File]::ReadAllText($resultPath,[System.Text.Encoding]::UTF8) | ConvertFrom-Json
+    try { $result = [System.IO.File]::ReadAllText($resultPath,[System.Text.Encoding]::UTF8) | ConvertFrom-Json } catch {
+        Set-RunFailed 'EngineResultCorrupt'
+        Show-GuiError ([regex]::Unescape('\u30A2\u30F3\u30A4\u30F3\u30B9\u30C8\u30FC\u30EB\u7D50\u679C\u3092\u78BA\u8A8D\u3067\u304D\u307E\u305B\u3093\u3067\u3057\u305F\u3002'))
+        Set-Page 'start'
+        return
+    }
     if ($exitCode -ne 0 -or -not [bool]$result.Succeeded) {
         $detail = [string]$result.ErrorMessage
         if ([string]::IsNullOrWhiteSpace($detail)) { $detail = 'アンインストールに失敗しました。' }
         [System.Windows.Forms.MessageBox]::Show($detail,'DenGo アンインストール',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
+        Set-RunFailed 'EngineFailed'
         Set-Page 'start'
         return
     }
+    if (-not (Test-UninstallCommitted $result $exitCode)) {
+        Set-RunFailed 'EngineStateNotCommitted'
+        Show-GuiError ([regex]::Unescape('\u30A2\u30F3\u30A4\u30F3\u30B9\u30C8\u30FC\u30EB\u7D50\u679C\u3092\u78BA\u8A8D\u3067\u304D\u307E\u305B\u3093\u3067\u3057\u305F\u3002'))
+        Set-Page 'start'
+        return
+    }
+    Set-RunCompleted
     Set-Page 'complete'
 })
 
 $startButton.Add_Click({
     if ($Preview) { Set-Page 'progress';$script:previewTimer=New-Object System.Windows.Forms.Timer;$script:previewTimer.Interval=700;$script:previewTimer.Add_Tick({$script:previewTimer.Stop();$script:previewTimer.Dispose();$script:previewTimer=$null;Set-Page 'complete'});$script:previewTimer.Start();return }
     if (-not (Confirm-RunningProductsClosed)) {
-        if (Confirm-Cancel) { $script:allowClose=$true;$form.Close() }
+        if (Confirm-Cancel) { Set-RunCancelled;$script:allowClose=$true;$form.Close() }
         return
     }
     if (-not [System.IO.File]::Exists($engine)) {
         [System.Windows.Forms.MessageBox]::Show(('アンインストールエンジンが見つかりません。' + [System.Environment]::NewLine + $engine),'DenGo アンインストール',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
+        Set-RunFailed 'EngineNotFound'
         return
     }
     if ([System.IO.Directory]::Exists($script:runRoot)) { Remove-Item -LiteralPath $script:runRoot -Recurse -Force }
@@ -324,15 +434,34 @@ $startButton.Add_Click({
     Set-Page 'progress'
     $script:barX=1;$script:barStep=7;$block.Left=1
     $arguments = @('-NoProfile','-ExecutionPolicy','Bypass','-File',$engine,'-Apply','-RealSystem','-ConfirmRealApply','UNINSTALL','-OutputRoot',$script:outputRoot)
-    $argumentLine=Join-NativeArguments $arguments;$script:process=Start-Process powershell.exe -ArgumentList $argumentLine -PassThru -WindowStyle Hidden
+    $argumentLine=Join-NativeArguments $arguments
+    $script:applyStartedAt = [System.DateTimeOffset]::Now
+    $script:engineCompleted = $false;$script:stateCommitted = $false
+    $script:applyRunning = $true
+    try {
+        $script:process=Start-Process powershell.exe -ArgumentList $argumentLine -PassThru -WindowStyle Hidden
+        $script:engineStarted = $true
+    } catch {
+        $script:applyRunning = $false;$script:process = $null
+        Set-RunFailed 'EngineLaunchFailed'
+        Show-GuiError ([regex]::Unescape('\u30A2\u30F3\u30A4\u30F3\u30B9\u30C8\u30FC\u30EB\u7D50\u679C\u3092\u78BA\u8A8D\u3067\u304D\u307E\u305B\u3093\u3067\u3057\u305F\u3002'))
+        Set-Page 'start'
+        return
+    }
     $timer.Start()
 })
-$cancelButton.Add_Click({ if (Confirm-Cancel) { $script:allowClose=$true;$form.Close() } })
+$cancelButton.Add_Click({ if (Confirm-Cancel) { Set-RunCancelled;$script:allowClose=$true;$form.Close() } })
 $finishButton.Add_Click({ $script:allowClose=$true;$form.Close() })
 $form.Add_FormClosing({
+    if ($script:applyRunning) {
+        if ($_.CloseReason -eq [System.Windows.Forms.CloseReason]::UserClosing) { $_.Cancel=$true }
+        else { Set-RunFailed 'GuiClosedDuringApply' }
+        return
+    }
     if ($script:allowClose) { return }
-    if ($progressPage.Visible) { $_.Cancel=$true;return }
-    if (Confirm-Cancel) { $script:allowClose=$true;$_.Cancel=$false } else { $_.Cancel=$true }
+    if ($_.CloseReason -ne [System.Windows.Forms.CloseReason]::UserClosing) { $script:allowClose=$true;return }
+    if ([string]::Equals($script:finalResult,'Completed',[System.StringComparison]::Ordinal)) { $script:allowClose=$true;return }
+    if (Confirm-Cancel) { Set-RunCancelled;$script:allowClose=$true;$_.Cancel=$false } else { $_.Cancel=$true }
 })
 $form.Add_FormClosed({
     $timer.Stop()
@@ -340,4 +469,6 @@ $form.Add_FormClosed({
     if ($null -ne $script:previewTimer) { try { $script:previewTimer.Stop();$script:previewTimer.Dispose() } catch {} }
 })
 Set-Page 'start'
-[void]$form.ShowDialog()
+[System.Windows.Forms.Application]::add_ThreadException([System.Threading.ThreadExceptionEventHandler]{ param($sender,$e);Invoke-UnhandledGuiException $e.Exception })
+try { [void]$form.ShowDialog() } catch { Set-RunFailed 'GuiException' }
+exit ([int](Complete-Run))

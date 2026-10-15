@@ -158,10 +158,135 @@ def verify_and_extract():
             raise RuntimeError("\u5185\u5305\u30D5\u30A1\u30A4\u30EB\u306E\u691C\u8A3C\u306B\u5931\u6557\u3057\u307E\u3057\u305F: " + entry["Path"])
     return bundle_root, run_root, package_root
 
-def run_script(package_root, script_name):
+def run_script(package_root, script_name, extra_args=None):
     script_path = os.path.join(package_root, "installer", "scripts", script_name)
-    completed = subprocess.run(["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File", script_path], cwd=package_root, shell=False)
+    command = ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File", script_path] + list(extra_args or [])
+    completed = subprocess.run(command, cwd=package_root, shell=False)
     return int(completed.returncode)
+
+EXIT_COMPLETED = 0
+EXIT_FAILED = 1
+EXIT_CANCELLED = 2
+RESULT_SCHEMA_VERSION = 1
+RESULT_FILE_NAME = "result.json"
+RESULT_DIR_PREFIX = "DenGoResult-"
+CLEANUP_DIAGNOSTICS = []
+
+def state_root():
+    return os.path.join(os.environ["LOCALAPPDATA"], "DenGo Controller Converter", "InstallerState")
+
+def new_result_channel():
+    result_dir = tempfile.mkdtemp(prefix=RESULT_DIR_PREFIX)
+    run_id = os.urandom(16).hex()
+    return result_dir, os.path.join(result_dir, RESULT_FILE_NAME), run_id
+
+def _is_int(value):
+    return isinstance(value, int) and not isinstance(value, bool)
+
+def evaluate_outcome(exit_code, result_path, run_id, operation):
+    # Returns (outcome, reason). Only an exact and fully consistent Completed record unlocks side effects.
+    if not _is_int(exit_code):
+        return "Failed", "ExitCodeInvalid"
+    try:
+        if not os.path.isfile(result_path):
+            return "Failed", "ResultMissing"
+        with open(result_path, "rb") as stream:
+            document = json.loads(stream.read().decode("utf-8-sig"))
+    except Exception:
+        return "Failed", "ResultCorrupt"
+    if not isinstance(document, dict):
+        return "Failed", "ResultCorrupt"
+    if not _is_int(document.get("schemaVersion")) or document["schemaVersion"] != RESULT_SCHEMA_VERSION:
+        return "Failed", "ResultSchema"
+    if document.get("operation") != operation:
+        return "Failed", "ResultOperation"
+    if not isinstance(document.get("runId"), str) or document["runId"] != run_id:
+        return "Failed", "ResultRunId"
+    expected_codes = {"Completed": EXIT_COMPLETED, "Cancelled": EXIT_CANCELLED, "Failed": EXIT_FAILED}
+    result = document.get("result")
+    if not isinstance(result, str) or result not in expected_codes:
+        return "Failed", "ResultUnknown"
+    declared = document.get("exitCode")
+    flags = [document.get(name) for name in ("engineStarted", "engineCompleted", "stateCommitted")]
+    if not _is_int(declared) or not all(isinstance(flag, bool) for flag in flags):
+        return "Failed", "ResultCorrupt"
+    if declared != expected_codes[result] or declared != exit_code:
+        return "Failed", "ResultMismatch"
+    started, completed, committed = flags
+    if result == "Completed":
+        if not (started and completed and committed):
+            return "Failed", "ResultInvariant"
+        return "Completed", "Completed"
+    if result == "Cancelled":
+        if started or completed or committed:
+            return "Failed", "ResultInvariant"
+        return "Cancelled", "Cancelled"
+    reason = document.get("reason")
+    return "Failed", reason if isinstance(reason, str) and reason else "Failed"
+
+def is_contract_violation(reason):
+    return reason == "ExitCodeInvalid" or reason.startswith("Result")
+
+def verify_committed_state(operation):
+    try:
+        root = state_root()
+        if operation == "Install":
+            if os.path.isfile(os.path.join(root, "installing.json")):
+                return False, "ResultStateInterrupted"
+            if not os.path.isfile(os.path.join(root, "installed-state.json")):
+                return False, "ResultStateMissing"
+            if not os.path.isfile(os.path.join(PRODUCT_DIR, "DenGoControllerConverter.exe")):
+                return False, "ResultStateMissing"
+            return True, "Completed"
+        if not os.path.isfile(os.path.join(root, "uninstalled-state.json")):
+            return False, "ResultStateMissing"
+        return True, "Completed"
+    except Exception:
+        return False, "ResultStateMissing"
+
+def record_cleanup_failure(path, detail):
+    entry = "{} | {} | {}".format(time.strftime("%Y-%m-%dT%H:%M:%S"), path, detail)
+    CLEANUP_DIAGNOSTICS.append(entry)
+    try:
+        with open(os.path.join(tempfile.gettempdir(), "DenGo-ResultCleanup-{}.txt".format(os.getpid())), "a", encoding="utf-8") as stream:
+            stream.write(entry + "\n")
+    except Exception:
+        pass
+
+def remove_result_dir(result_dir):
+    # Deletes only a directory this process created under TEMP; a failure is recorded and never changes the verified outcome.
+    try:
+        full = os.path.abspath(result_dir)
+        temp_root = os.path.abspath(tempfile.gettempdir())
+        if os.path.normcase(os.path.dirname(full)) != os.path.normcase(temp_root) or not os.path.basename(full).startswith(RESULT_DIR_PREFIX) or os.path.islink(full):
+            raise RuntimeError("Refusing to delete an unexpected result directory.")
+        last_error = ""
+        for _ in range(10):
+            try:
+                shutil.rmtree(full)
+                return True
+            except FileNotFoundError:
+                return True
+            except Exception as exc:
+                last_error = str(exc)
+                time.sleep(0.2)
+        raise RuntimeError(last_error)
+    except Exception as exc:
+        record_cleanup_failure(result_dir, str(exc))
+        return False
+
+def execute_operation(operation, script_name, package_root):
+    result_dir, result_path, run_id = new_result_channel()
+    try:
+        code = run_script(package_root, script_name, ["-ResultPath", result_path, "-RunId", run_id])
+        outcome, reason = evaluate_outcome(code, result_path, run_id, operation)
+        if outcome == "Completed":
+            committed, why = verify_committed_state(operation)
+            if not committed:
+                outcome, reason = "Failed", why
+    finally:
+        remove_result_dir(result_dir)
+    return outcome, reason
 
 def cleanup(path):
     for _ in range(10):
@@ -228,12 +353,16 @@ def main():
     run_root = None
     try:
         _, run_root, package_root = verify_and_extract()
-        code = run_script(package_root, "Start-DenGoUninstall.ps1")
-        if code != 0:
-            return code
+        outcome, reason = execute_operation("Uninstall", "Start-DenGoUninstall.ps1", package_root)
+        if outcome == "Cancelled":
+            return EXIT_CANCELLED
+        if outcome != "Completed":
+            if is_contract_violation(reason):
+                message("\u30A2\u30F3\u30A4\u30F3\u30B9\u30C8\u30FC\u30EB\u306E\u7D50\u679C\u3092\u78BA\u8A8D\u3067\u304D\u307E\u305B\u3093\u3067\u3057\u305F\u3002\n\u767B\u9332\u3068\u30A2\u30F3\u30A4\u30F3\u30B9\u30C8\u30FC\u30E9\u30FC\u306F\u5909\u66F4\u3057\u3066\u3044\u307E\u305B\u3093\u3002")
+            return EXIT_FAILED
         remove_registration()
         schedule_self_delete()
-        return 0
+        return EXIT_COMPLETED
     except Exception as exc:
         return fail("\u51E6\u7406\u4E2D\u306B\u30A8\u30E9\u30FC\u304C\u767A\u751F\u3057\u307E\u3057\u305F\u3002\n" + str(exc))
     finally:
@@ -294,12 +423,16 @@ def main():
     run_root = None
     try:
         bundle_root, run_root, package_root = verify_and_extract()
-        code = run_script(package_root, "Start-DenGoSetup.ps1")
-        if code != 0:
-            return code
+        outcome, reason = execute_operation("Install", "Start-DenGoSetup.ps1", package_root)
+        if outcome == "Cancelled":
+            return EXIT_CANCELLED
+        if outcome != "Completed":
+            if is_contract_violation(reason):
+                message("\u30BB\u30C3\u30C8\u30A2\u30C3\u30D7\u306E\u7D50\u679C\u3092\u78BA\u8A8D\u3067\u304D\u307E\u305B\u3093\u3067\u3057\u305F\u3002\n\u30A2\u30F3\u30A4\u30F3\u30B9\u30C8\u30FC\u30E9\u30FC\u306E\u767B\u9332\u306F\u884C\u3044\u307E\u305B\u3093\u3002")
+            return EXIT_FAILED
         install_uninstaller(bundle_root)
         register_uninstaller()
-        return 0
+        return EXIT_COMPLETED
     except Exception as exc:
         return fail("\u51E6\u7406\u4E2D\u306B\u30A8\u30E9\u30FC\u304C\u767A\u751F\u3057\u307E\u3057\u305F\u3002\n" + str(exc))
     finally:

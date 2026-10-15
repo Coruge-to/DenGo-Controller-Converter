@@ -1,6 +1,8 @@
 ﻿param(
     [ValidateSet('Normal','Symbols','PCSX2Conflict','RPCS3Conflict','BothConflicts','PCSX2Unsupported','BveEXMissing')]
-    [string]$Preview = 'Normal'
+    [string]$Preview = 'Normal',
+    [string]$ResultPath = '',
+    [string]$RunId = ''
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2.0
@@ -25,6 +27,13 @@ $script:decisions = @{}
 $script:unsupportedPCSX2Shown = $false
 $script:missingBveEXShown = $false
 $script:bveIntegrationSkipped = $false
+$script:finalResult = 'Failed'
+$script:finalReason = 'NotCompleted'
+$script:applyRunning = $false
+$script:engineStarted = $false
+$script:engineCompleted = $false
+$script:stateCommitted = $false
+$script:applyStartedAt = [System.DateTimeOffset]::MinValue
 $script:barX = 1
 $script:barStep = 7
 
@@ -393,7 +402,7 @@ function Confirm-RunningProductsClosed {
     }
 }
 function Start-SandboxApply {
-    if(-not(Confirm-RunningProductsClosed)){if(Confirm-SetupCancel){$script:allowClose=$true;$form.Close()}else{Set-Page 'welcome'};return}
+    if(-not(Confirm-RunningProductsClosed)){if(Confirm-SetupCancel){Set-RunCancelled;$script:allowClose=$true;$form.Close()}else{Set-Page 'welcome'};return}
     Set-Page 'progress'
     $progressText.Text='インストールしています'
     $progressHint.Text='ファイルと設定を適用しています'
@@ -409,10 +418,103 @@ function Start-SandboxApply {
     [System.IO.Directory]::CreateDirectory($applyOutput) | Out-Null
     $applyStdout = Join-Path $applyOutput 'engine-stdout.txt'
     $applyStderr = Join-Path $applyOutput 'engine-stderr.txt'
-    $argumentLine=Join-NativeArguments $args;$script:process=Start-Process powershell.exe -ArgumentList $argumentLine -PassThru -WindowStyle Hidden -RedirectStandardOutput $applyStdout -RedirectStandardError $applyStderr
+    $argumentLine=Join-NativeArguments $args
+    $script:applyStartedAt=[System.DateTimeOffset]::Now
+    $script:engineCompleted=$false;$script:stateCommitted=$false
+    $script:applyRunning=$true
+    try{
+        $script:process=Start-Process powershell.exe -ArgumentList $argumentLine -PassThru -WindowStyle Hidden -RedirectStandardOutput $applyStdout -RedirectStandardError $applyStderr
+        $script:engineStarted=$true
+    }catch{
+        $script:applyRunning=$false;$script:process=$null;$script:operation='idle'
+        Set-RunFailed 'EngineLaunchFailed'
+        Show-GuiError ([regex]::Unescape('\u30A4\u30F3\u30B9\u30C8\u30FC\u30EB\u7D50\u679C\u3092\u78BA\u8A8D\u3067\u304D\u307E\u305B\u3093\u3067\u3057\u305F\u3002'))
+        Set-Page 'welcome'
+        return
+    }
     $timer.Start()
 }
+# --- I1 result contract: Completed (exit 0) / Cancelled (exit 2) / Failed (exit 1) ---
+function Show-GuiError([string]$Text) {
+    [void][System.Windows.Forms.MessageBox]::Show($Text,[regex]::Unescape('DenGo \u30BB\u30C3\u30C8\u30A2\u30C3\u30D7'),[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Error)
+}
+function Set-RunFailed([string]$Reason) {
+    $script:engineCompleted=$false;$script:stateCommitted=$false
+    $script:finalResult='Failed';$script:finalReason=$Reason
+}
+function Set-RunFailure([bool]$IsApply,[string]$Suffix) {
+    if($IsApply){Set-RunFailed ('Engine'+$Suffix);return}
+    if(-not [string]::Equals($script:finalResult,'Completed',[System.StringComparison]::Ordinal)){Set-RunFailed ('DryRun'+$Suffix)}
+}
+function Set-RunCompleted {
+    $script:finalResult='Completed';$script:finalReason='Completed'
+    $script:engineCompleted=$true;$script:stateCommitted=$true
+}
+# Cancelled is reachable only through an explicit, confirmed pre-apply cancel; anything else stays Failed/NotCompleted.
+function Set-RunCancelled {
+    if([string]::Equals($script:finalResult,'Failed',[System.StringComparison]::Ordinal) -and [string]::Equals($script:finalReason,'NotCompleted',[System.StringComparison]::Ordinal) -and -not $script:engineStarted){
+        $script:finalResult='Cancelled';$script:finalReason='UserCancelled'
+    }
+}
+function Invoke-UnhandledGuiException([System.Exception]$Exception) {
+    if(-not [string]::Equals($script:finalResult,'Completed',[System.StringComparison]::Ordinal) -and [string]::Equals($script:finalReason,'NotCompleted',[System.StringComparison]::Ordinal)){Set-RunFailed 'UnhandledException'}
+    $detail=''
+    if($null -ne $Exception){$detail=[System.Environment]::NewLine+[System.Environment]::NewLine+[string]$Exception.Message}
+    Show-GuiError ([regex]::Unescape('\u4E88\u671F\u3057\u306A\u3044\u30A8\u30E9\u30FC\u304C\u767A\u751F\u3057\u307E\u3057\u305F\u3002')+$detail)
+}
+function Test-ApplyCommitted([object]$Plan) {
+    try {
+        if(-not [bool]$Plan.Succeeded){return $false}
+        if(-not [bool]$Plan.Apply -or -not [bool]$Plan.RealSystem){return $false}
+        $core=@($Plan.ApplyResults|Where-Object{$_.Platform -eq 'Core' -and $_.Component -eq 'Application'})
+        if($core.Count -ne 1){return $false}
+        $stateRoot=Join-Path $env:LOCALAPPDATA 'DenGo Controller Converter\InstallerState'
+        if([System.IO.File]::Exists((Join-Path $stateRoot 'installing.json'))){return $false}
+        $statePath=Join-Path $stateRoot 'installed-state.json'
+        if(-not [System.IO.File]::Exists($statePath)){return $false}
+        $state=[System.IO.File]::ReadAllText($statePath,[System.Text.Encoding]::UTF8)|ConvertFrom-Json
+        if([int]$state.SchemaVersion -ne 1){return $false}
+        $installedAt=[System.DateTimeOffset]::Parse([string]$state.InstalledAt,[System.Globalization.CultureInfo]::InvariantCulture)
+        return ($installedAt -ge $script:applyStartedAt)
+    } catch { return $false }
+}
+function Write-RunResult([string]$Result,[string]$Reason,[int]$ExitCode) {
+    if([string]::IsNullOrWhiteSpace($ResultPath)){return $true}
+    $temporary=$null
+    try {
+        if([string]::IsNullOrWhiteSpace($RunId)){return $false}
+        $final=[System.IO.Path]::GetFullPath($ResultPath)
+        $directory=[System.IO.Path]::GetDirectoryName($final)
+        if(-not [System.IO.Directory]::Exists($directory)){return $false}
+        if([System.IO.File]::Exists($final)){return $false}
+        $temporary=$final+'.tmp'
+        $document=[ordered]@{schemaVersion=1;operation='Install';runId=$RunId;result=$Result;reason=$Reason;exitCode=$ExitCode;engineStarted=[bool]$script:engineStarted;engineCompleted=[bool]$script:engineCompleted;stateCommitted=[bool]$script:stateCommitted;writtenAt=[System.DateTimeOffset]::Now.ToString('o')}
+        $bytes=(New-Object System.Text.UTF8Encoding($false)).GetBytes(($document|ConvertTo-Json))
+        $stream=New-Object System.IO.FileStream($temporary,[System.IO.FileMode]::CreateNew,[System.IO.FileAccess]::Write,[System.IO.FileShare]::None)
+        try{$stream.Write($bytes,0,$bytes.Length);$stream.Flush($true)}finally{$stream.Dispose()}
+        $check=[System.IO.File]::ReadAllText($temporary,[System.Text.Encoding]::UTF8)|ConvertFrom-Json
+        if([int]$check.schemaVersion -ne 1 -or -not [string]::Equals([string]$check.runId,$RunId,[System.StringComparison]::Ordinal) -or -not [string]::Equals([string]$check.result,$Result,[System.StringComparison]::Ordinal) -or [int]$check.exitCode -ne $ExitCode){throw 'Result verification failed.'}
+        [System.IO.File]::Move($temporary,$final)
+        return $true
+    } catch {
+        try{if($null -ne $temporary -and [System.IO.File]::Exists($temporary)){[System.IO.File]::Delete($temporary)}}catch{}
+        return $false
+    }
+}
+function Complete-Run {
+    $result=$script:finalResult;$reason=$script:finalReason
+    $invariantOk=$true
+    if([string]::Equals($result,'Completed',[System.StringComparison]::Ordinal)){$invariantOk=[bool]($script:engineStarted -and $script:engineCompleted -and $script:stateCommitted)}
+    elseif([string]::Equals($result,'Cancelled',[System.StringComparison]::Ordinal)){$invariantOk=-not [bool]($script:engineStarted -or $script:engineCompleted -or $script:stateCommitted)}
+    if(-not $invariantOk){$result='Failed';$reason='InvariantViolation'}
+    $exitCode=1
+    if([string]::Equals($result,'Completed',[System.StringComparison]::Ordinal)){$exitCode=0}
+    elseif([string]::Equals($result,'Cancelled',[System.StringComparison]::Ordinal)){$exitCode=2}
+    if(-not (Write-RunResult $result $reason $exitCode)){return 1}
+    return $exitCode
+}
 function Stop-CurrentProcess {
+    if($script:applyRunning){return}
     if($null-ne$script:process-and-not$script:process.HasExited){
         try{$script:process.Kill();$script:process.WaitForExit()}catch{}
     }
@@ -423,15 +525,17 @@ function Confirm-SetupCancel {
     $answer=[System.Windows.Forms.MessageBox]::Show('セットアップを中止しますか？','DenGo Controller Converter セットアップ',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Question)
     return $answer -eq [System.Windows.Forms.DialogResult]::Yes
 }
-$timer.Add_Tick({$limit=$track.ClientSize.Width-$block.Width-2;$script:barX+=$script:barStep;if($script:barX-ge$limit){$script:barX=$limit;$script:barStep=-7};if($script:barX-le1){$script:barX=1;$script:barStep=7};$block.Left=$script:barX;if($null-eq$script:process-or-not$script:process.HasExited){return};$timer.Stop();$code=$script:process.ExitCode;$script:process.Dispose();$script:process=$null;if(-not[System.IO.File]::Exists($script:planPath)){$failureRoot=[System.IO.Path]::GetDirectoryName($script:planPath);$stderrPath=Join-Path $failureRoot 'engine-stderr.txt';$stdoutPath=Join-Path $failureRoot 'engine-stdout.txt';$detail='';if([System.IO.File]::Exists($stderrPath)){$detail=Read-TextFileShared $stderrPath};if([string]::IsNullOrWhiteSpace($detail)-and[System.IO.File]::Exists($stdoutPath)){$detail=Read-TextFileShared $stdoutPath};$message='処理結果を確認できませんでした。 終了コード: '+$code;if(-not[string]::IsNullOrWhiteSpace($detail)){$message+=[System.Environment]::NewLine+[System.Environment]::NewLine+$detail};[System.Windows.Forms.MessageBox]::Show($message,'DenGo セットアップ')|Out-Null;Set-Page 'welcome';return};$script:plan=[System.IO.File]::ReadAllText($script:planPath,[System.Text.Encoding]::UTF8)|ConvertFrom-Json;if(-not[bool]$script:plan.Succeeded){$detail=[string]$script:plan.ErrorMessage;if([string]::IsNullOrWhiteSpace($detail)){$detail='処理に失敗しました'};[System.Windows.Forms.MessageBox]::Show($detail,'DenGo セットアップ')|Out-Null;Set-Page 'welcome';return};if($script:operation-eq'real-apply'){$script:operation='idle';$script:lastResultAvailable=$true;Show-Results;return};if(-not$script:missingBveEXShown-and(Has-DetectedBveWithoutBveEX)){$script:missingBveEXShown=$true;$script:bveIntegrationSkipped=$true;Show-MissingBveEXDialog};if(-not$script:unsupportedPCSX2Shown-and(Has-UnsupportedCurrentPCSX2)){$script:unsupportedPCSX2Shown=$true;Show-UnsupportedPCSX2Dialog};$script:conflicts=@();foreach($n in @('PCSX2','RPCS3')){if(Has-Conflict $n){$script:conflicts+=$n}};$script:conflictIndex=0;$script:decisions=@{};if(@($script:conflicts).Count-eq0){Start-SandboxApply}else{Show-Conflict}})
-$next.Add_Click({if(-not(Confirm-RunningProductsClosed)){if(Confirm-SetupCancel){$script:allowClose=$true;$form.Close()};return};Start-Detection $false})
+$timer.Add_Tick({$limit=$track.ClientSize.Width-$block.Width-2;$script:barX+=$script:barStep;if($script:barX-ge$limit){$script:barX=$limit;$script:barStep=-7};if($script:barX-le1){$script:barX=1;$script:barStep=7};$block.Left=$script:barX;if($null-eq$script:process-or-not$script:process.HasExited){return};$timer.Stop();$code=$script:process.ExitCode;$script:process.Dispose();$script:process=$null;$wasApply=($script:operation-eq'real-apply');$script:applyRunning=$false;if(-not[System.IO.File]::Exists($script:planPath)){$failureRoot=[System.IO.Path]::GetDirectoryName($script:planPath);$stderrPath=Join-Path $failureRoot 'engine-stderr.txt';$stdoutPath=Join-Path $failureRoot 'engine-stdout.txt';$detail='';if([System.IO.File]::Exists($stderrPath)){$detail=Read-TextFileShared $stderrPath};if([string]::IsNullOrWhiteSpace($detail)-and[System.IO.File]::Exists($stdoutPath)){$detail=Read-TextFileShared $stdoutPath};$message='処理結果を確認できませんでした。 終了コード: '+$code;if(-not[string]::IsNullOrWhiteSpace($detail)){$message+=[System.Environment]::NewLine+[System.Environment]::NewLine+$detail};[System.Windows.Forms.MessageBox]::Show($message,'DenGo セットアップ')|Out-Null;Set-RunFailure $wasApply 'NoResult';Set-Page 'welcome';return};try{$script:plan=[System.IO.File]::ReadAllText($script:planPath,[System.Text.Encoding]::UTF8)|ConvertFrom-Json}catch{Set-RunFailure $wasApply 'ResultCorrupt';Show-GuiError ([regex]::Unescape('\u30A4\u30F3\u30B9\u30C8\u30FC\u30EB\u7D50\u679C\u3092\u78BA\u8A8D\u3067\u304D\u307E\u305B\u3093\u3067\u3057\u305F\u3002'));Set-Page 'welcome';return};if(-not[bool]$script:plan.Succeeded){$detail=[string]$script:plan.ErrorMessage;if([string]::IsNullOrWhiteSpace($detail)){$detail='処理に失敗しました'};[System.Windows.Forms.MessageBox]::Show($detail,'DenGo セットアップ')|Out-Null;Set-RunFailure $wasApply 'Failed';Set-Page 'welcome';return};if($script:operation-eq'real-apply'){$script:operation='idle';if(-not(Test-ApplyCommitted $script:plan)){Set-RunFailure $true 'StateNotCommitted';Show-GuiError ([regex]::Unescape('\u30A4\u30F3\u30B9\u30C8\u30FC\u30EB\u7D50\u679C\u3092\u78BA\u8A8D\u3067\u304D\u307E\u305B\u3093\u3067\u3057\u305F\u3002'));Set-Page 'welcome';return};Set-RunCompleted;$script:lastResultAvailable=$true;Show-Results;return};if(-not$script:missingBveEXShown-and(Has-DetectedBveWithoutBveEX)){$script:missingBveEXShown=$true;$script:bveIntegrationSkipped=$true;Show-MissingBveEXDialog};if(-not$script:unsupportedPCSX2Shown-and(Has-UnsupportedCurrentPCSX2)){$script:unsupportedPCSX2Shown=$true;Show-UnsupportedPCSX2Dialog};$script:conflicts=@();foreach($n in @('PCSX2','RPCS3')){if(Has-Conflict $n){$script:conflicts+=$n}};$script:conflictIndex=0;$script:decisions=@{};if(@($script:conflicts).Count-eq0){Start-SandboxApply}else{Show-Conflict}})
+$next.Add_Click({if(-not(Confirm-RunningProductsClosed)){if(Confirm-SetupCancel){Set-RunCancelled;$script:allowClose=$true;$form.Close()};return};Start-Detection $false})
 $search.Add_Click({Start-Detection $true})
 $cancel.Add_Click({
+    if($script:applyRunning){return}
     if($script:operation -eq 'additional-search'){
         Stop-CurrentProcess
         $script:operation='idle'
         if($script:lastResultAvailable){Set-Page 'result'}else{Set-Page 'welcome'}
     } elseif(Confirm-SetupCancel){
+        Set-RunCancelled
         Stop-CurrentProcess
         $script:allowClose=$true
         $form.Close()
@@ -456,8 +560,24 @@ $finish.Add_Click({
 })
 $useExisting.Add_Click({Resolve-Conflict 'keep'});$replaceSetting.Add_Click({Resolve-Conflict 'replace'})
 $form.Add_FormClosing({
+    if($script:applyRunning){
+        if($_.CloseReason -eq [System.Windows.Forms.CloseReason]::UserClosing){$_.Cancel=$true}
+        else{Set-RunFailed 'GuiClosedDuringApply'}
+        return
+    }
     if($script:allowClose){return}
+    if($_.CloseReason -ne [System.Windows.Forms.CloseReason]::UserClosing){
+        Stop-CurrentProcess
+        $script:allowClose=$true
+        return
+    }
+    if([string]::Equals($script:finalResult,'Completed',[System.StringComparison]::Ordinal)){
+        Stop-CurrentProcess
+        $script:allowClose=$true
+        return
+    }
     if(Confirm-SetupCancel){
+        Set-RunCancelled
         Stop-CurrentProcess
         $script:allowClose=$true
         $_.Cancel=$false
@@ -473,4 +593,6 @@ elseif($Preview -eq 'BothConflicts'){Start-ConflictPreview @('PCSX2','RPCS3')}
 elseif($Preview -eq 'PCSX2Unsupported'){Start-UnsupportedPCSX2Preview}
 elseif($Preview -eq 'BveEXMissing'){Start-MissingBveEXPreview}
 else{Set-Page 'welcome'}
-[void]$form.ShowDialog()
+[System.Windows.Forms.Application]::add_ThreadException([System.Threading.ThreadExceptionEventHandler]{param($sender,$e);Invoke-UnhandledGuiException $e.Exception})
+try{[void]$form.ShowDialog()}catch{Set-RunFailed 'GuiException'}
+exit ([int](Complete-Run))

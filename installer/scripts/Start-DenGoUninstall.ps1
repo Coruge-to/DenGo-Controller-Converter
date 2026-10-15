@@ -1,4 +1,8 @@
-﻿param([switch]$Elevated)
+﻿param(
+    [switch]$Elevated,
+    [string]$ResultPath = '',
+    [string]$RunId = ''
+)
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2.0
 Add-Type -AssemblyName System.Windows.Forms
@@ -48,6 +52,7 @@ if (-not [System.IO.File]::Exists($gui)) { throw ('Uninstaller GUI not found: ' 
 
 if (-not (Test-Administrator)) {
     $arguments = @('-NoProfile','-ExecutionPolicy','Bypass','-WindowStyle','Hidden','-File',$MyInvocation.MyCommand.Path,'-Elevated')
+    if (-not [string]::IsNullOrWhiteSpace($ResultPath)) { $arguments += @('-ResultPath',$ResultPath,'-RunId',$RunId) }
     $startInfo = New-Object System.Diagnostics.ProcessStartInfo
     $startInfo.FileName = 'powershell.exe'
     $startInfo.Arguments = Join-NativeArguments $arguments
@@ -61,11 +66,18 @@ if (-not (Test-Administrator)) {
     } catch [System.ComponentModel.Win32Exception] {
         if ([int]$_.Exception.NativeErrorCode -eq 1223) {
             Show-ForegroundInformation 'アンインストールを中止しました' 'DenGo Controller Converter アンインストール'
-            exit 0
+            exit 2
         }
         throw
     }
 }
 
-& powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File $gui
-exit $LASTEXITCODE
+$guiArguments = @('-NoProfile','-ExecutionPolicy','Bypass','-WindowStyle','Hidden','-File',$gui)
+if (-not [string]::IsNullOrWhiteSpace($ResultPath)) { $guiArguments += @('-ResultPath',$ResultPath,'-RunId',$RunId) }
+& powershell.exe @guiArguments
+# Exit code contract: 0 = Completed, 2 = Cancelled, anything else (or no exit code at all) = Failed.
+$guiExitCode = $null
+$guiExitVariable = Get-Variable -Name LASTEXITCODE -Scope Global -ErrorAction SilentlyContinue
+if ($null -ne $guiExitVariable) { $guiExitCode = $guiExitVariable.Value }
+if ($null -eq $guiExitCode) { exit 1 }
+exit ([int]$guiExitCode)
