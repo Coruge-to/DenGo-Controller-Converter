@@ -443,7 +443,8 @@ if ($ctxs.ContainsKey('P2')) {
     $planJson = Join-Path $out 'uninstall-plan.json'
     $items = @()
     if ([System.IO.File]::Exists($planJson)) { $items = @(([System.IO.File]::ReadAllText($planJson, [System.Text.Encoding]::UTF8) | ConvertFrom-Json).Items) }
-    $unsafe = @($items | Where-Object { $_.Action -eq 'UnsafeOrUnknown' })
+    # I2-C: the engine builds its layout with the fixed literal C:\Users\Public for BveEX Current / AtsEX Legacy, so the sandbox copies of those records are (correctly) not DenGo leaves; every other record must be understood
+    $unsafe = @($items | Where-Object { $_.Action -eq 'UnsafeOrUnknown' -and $_.Platform -notin @('BveEX Current', 'AtsEX Legacy') })
     [void](Assert-I2A 'N14-uninstaller-dryrun-reads-new-state' (($prc.ExitCode -eq 0) -and ($items.Count -ge 12) -and ($unsafe.Count -eq 0)) "exit=$($prc.ExitCode) items=$($items.Count) unsafe=$($unsafe.Count) err=[$($errTask.Result.Trim())]")
     $carriedActions = @($items | Where-Object { $_.Destination -eq $c5 } | ForEach-Object { $_.Action })
     [void](Assert-I2A 'N14-uninstaller-sees-carried-record' ($carriedActions.Count -eq 1 -and $carriedActions[0] -eq 'Remove') "action for the carried BVE5 file: $($carriedActions -join ',')")
@@ -734,7 +735,7 @@ if ($ctxs.ContainsKey('P1')) {
     $sc4 = Get-ScState $L
     [void](Assert-I2A 'F2-stage-failure-keeps-the-record' (($r4.Succeeded -eq $true) -and ($r4.ShortcutError -like 'ShortcutStagingFailed*') -and ($sc4.Created -eq $true) -and ($sc4.PreExisted -eq $false) -and ($sc4.Path -eq $P.ShortcutPath)) "error=[$($r4.ShortcutError)] created=$($sc4.Created) preExisted=$($sc4.PreExisted): the earlier correct record is not overwritten with Created=false")
     $dry = Invoke-UninstallDryRun $L
-    [void](Assert-I2A 'F2-uninstaller-dryrun-reads-the-state' (($dry.ExitCode -eq 0) -and (@($dry.Items | Where-Object { $_.Action -eq 'UnsafeOrUnknown' }).Count -eq 0) -and ($dry.Items.Count -ge 1)) "exit=$($dry.ExitCode) items=$($dry.Items.Count) err=[$($dry.Err.Trim())]")
+    [void](Assert-I2A 'F2-uninstaller-dryrun-reads-the-state' (($dry.ExitCode -eq 0) -and (@($dry.Items | Where-Object { $_.Action -eq 'UnsafeOrUnknown' -and $_.Platform -notin @('BveEX Current', 'AtsEX Legacy') }).Count -eq 0) -and ($dry.Items.Count -ge 1)) "exit=$($dry.ExitCode) items=$($dry.Items.Count) err=[$($dry.Err.Trim())]")
     # c: the user had a shortcut of that name before the first install -> true, and it stays true; the backup of the user's shortcut is never lost
     Reset-Case $C
     Reset-I2AFault; Reset-I2ACounters
@@ -748,7 +749,7 @@ if ($ctxs.ContainsKey('P1')) {
     [void](Assert-I2A 'F2-preexisting-is-true' (($r1.Succeeded -eq $true) -and ($sc1.PreExisted -eq $true) -and ($sc1.BackupSHA256 -eq $userSha) -and (@($sc1.Backups).Count -eq 1)) "preExisted=$($sc1.PreExisted)")
     [void](Assert-I2A 'F2-preexisting-stays-true' (($r2.Succeeded -eq $true) -and ($sc2.PreExisted -eq $true) -and ($sc2.Backup -eq $sc1.Backup) -and ($sc2.BackupSHA256 -eq $userSha) -and $bakOk) "reinstall: preExisted=$($sc2.PreExisted); the origin backup still holds the user's shortcut ($bakOk)")
     $dry = Invoke-UninstallDryRun $L
-    [void](Assert-I2A 'F2-uninstaller-dryrun-reads-the-preexisting-state' (($dry.ExitCode -eq 0) -and (@($dry.Items | Where-Object { $_.Action -eq 'UnsafeOrUnknown' }).Count -eq 0)) "exit=$($dry.ExitCode) items=$($dry.Items.Count)")
+    [void](Assert-I2A 'F2-uninstaller-dryrun-reads-the-preexisting-state' (($dry.ExitCode -eq 0) -and (@($dry.Items | Where-Object { $_.Action -eq 'UnsafeOrUnknown' -and $_.Platform -notin @('BveEX Current', 'AtsEX Legacy') }).Count -eq 0)) "exit=$($dry.ExitCode) items=$($dry.Items.Count)")
     # d: the user edited the shortcut we created -> Diverged: not overwritten, no item, the recorded facts stay
     Reset-Case $C
     Reset-I2AFault; Reset-I2ACounters

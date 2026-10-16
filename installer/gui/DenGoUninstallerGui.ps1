@@ -198,6 +198,16 @@ $completeText.Font = New-Object System.Drawing.Font('Yu Gothic UI',10)
 $completeText.AutoSize = $true
 $completeText.Location = New-Object System.Drawing.Point(45,139)
 $completePage.Controls.Add($completeText)
+# Residual notice: shown only after a Completed run that left files behind (the label stays hidden otherwise).
+$completeNotice = New-Object System.Windows.Forms.Label
+$completeNotice.Text = ''
+$completeNotice.Font = New-Object System.Drawing.Font('Yu Gothic UI',9.5)
+$completeNotice.ForeColor = [System.Drawing.Color]::FromArgb(150,70,0)
+$completeNotice.AutoSize = $false
+$completeNotice.Size = New-Object System.Drawing.Size(470,72)
+$completeNotice.Location = New-Object System.Drawing.Point(45,205)
+$completeNotice.Visible = $false
+$completePage.Controls.Add($completeNotice)
 
 function Set-Page {
     param([string]$Name)
@@ -320,6 +330,27 @@ function Invoke-UnhandledGuiException {
     if ($null -ne $Exception) { $detail = [System.Environment]::NewLine + [System.Environment]::NewLine + [string]$Exception.Message }
     Show-GuiError ([regex]::Unescape('\u4E88\u671F\u3057\u306A\u3044\u30A8\u30E9\u30FC\u304C\u767A\u751F\u3057\u307E\u3057\u305F\u3002') + $detail)
 }
+function Set-ResidualNotice {
+    param([object]$Result)
+    $show = $false
+    $text = '一部のファイルを安全のため残しました'
+    try {
+        $count = 0
+        $property = $Result.PSObject.Properties['ResidualFileCount']
+        if ($null -ne $property) { $count = [int]$property.Value }
+        $manual = $false
+        $property = $Result.PSObject.Properties['ManualCheckRequired']
+        if ($null -ne $property) { $manual = [bool]$property.Value }
+        $show = ($count -gt 0) -or $manual
+        $property = $Result.PSObject.Properties['ReportPath']
+        if ($show -and $null -ne $property) {
+            $candidate = [string]$property.Value
+            if (-not [string]::IsNullOrWhiteSpace($candidate) -and [System.IO.File]::Exists($candidate)) { $text += [System.Environment]::NewLine + '確認先：' + $candidate }
+        }
+    } catch { $show = $false }
+    $completeNotice.Text = $text
+    $completeNotice.Visible = $show
+}
 function Test-UninstallCommitted {
     param([object]$Result,[int]$ExitCode)
     try {
@@ -414,6 +445,7 @@ $timer.Add_Tick({
         Set-Page 'start'
         return
     }
+    Set-ResidualNotice $result
     Set-RunCompleted
     Set-Page 'complete'
 })

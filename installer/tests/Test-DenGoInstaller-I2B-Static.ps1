@@ -217,7 +217,8 @@ else {
     [void](Assert-I2A 'S10-deferred-branch-is-before-ok-and-fail' (($row5.IndexOf('Test-ApplyDeferred', [System.StringComparison]::Ordinal) -lt $row5.IndexOf($okText, [System.StringComparison]::Ordinal)) -and ($row5.IndexOf('Test-ApplyDeferred', [System.StringComparison]::Ordinal) -lt $row5.IndexOf($failText, [System.StringComparison]::Ordinal))) 'the Deferred branch is tested first')
 }
 # ---------------------------------------------------------------- S11 files that must stay untouched are byte-identical to the I2-A commit
-foreach ($rel in 'installer/Build-DenGo-SetupExe-2.0.0.ps1', 'installer/scripts/Start-DenGoSetup.ps1', 'installer/scripts/Start-DenGoUninstall.ps1', 'installer/scripts/Invoke-DenGoUninstaller.ps1', 'installer/gui/DenGoUninstallerGui.ps1', 'installer/tests/Test-DenGoInstaller-R1A.ps1', 'installer/tests/Test-DenGoInstaller-R1B.ps1', 'installer/tests/Test-DenGoInstaller-I1-Gui.ps1', 'installer/tests/I1.TestSupport.ps1') {
+# (I2-C: Invoke-DenGoUninstaller.ps1 and DenGoUninstallerGui.ps1 are changed by I2-C on purpose; Test-DenGoInstaller-I2C-Static.ps1 guards them)
+foreach ($rel in 'installer/Build-DenGo-SetupExe-2.0.0.ps1', 'installer/scripts/Start-DenGoSetup.ps1', 'installer/scripts/Start-DenGoUninstall.ps1', 'installer/tests/Test-DenGoInstaller-R1A.ps1', 'installer/tests/Test-DenGoInstaller-R1B.ps1', 'installer/tests/Test-DenGoInstaller-I1-Gui.ps1', 'installer/tests/I1.TestSupport.ps1') {
     $base = Get-BaselineText $rel
     if ($null -eq $base) { [void](Assert-I2A ('S11-' + $rel) $true 'baseline unavailable; skipped'); continue }
     [void](Assert-I2A ('S11-unchanged-' + $rel) ($base -eq (Get-CurrentText (Join-Path $repo $rel.Replace('/', '\')))) 'identical to the I2-A commit')

@@ -26,7 +26,8 @@ $requiredFiles = @(
     'scripts\Invoke-DenGoInstaller.ps1',
     'scripts\Invoke-DenGoUninstaller.ps1',
     'scripts\DenGoInstallerTransaction.ps1',
-    'scripts\DenGoInstallerProductApply.ps1'
+    'scripts\DenGoInstallerProductApply.ps1',
+    'scripts\DenGoUninstallerProductApply.ps1'
 )
 
 try {
