@@ -133,7 +133,7 @@ $mapFn = @($pa.FindAll({ param($x) $x -is [System.Management.Automation.Language
 
 # ---------------------------------------------------------------- S7 lock
 $lockFn = @($pa.FindAll({ param($x) $x -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $x.Name -eq 'Get-DenGoLockName' }, $true))[0].Extent.Text
-[void](Assert-I2A 'S7-lock-name-constant' ($lockFn -match "return 'Local\\DenGoControllerConverter\.Transaction'") $lockFn)
+[void](Assert-I2A 'S7-lock-name-constant' ($lockFn -match "return 'Global\\DenGoControllerConverter\.Transaction'") $lockFn)
 $tries = @($pa.FindAll({ param($x) $x -is [System.Management.Automation.Language.TryStatementAst] }, $true))
 $releaseInFinally = @($tries | Where-Object { $null -ne $_.Finally -and (@($_.Finally.FindAll({ param($y) $y -is [System.Management.Automation.Language.CommandAst] -and $y.GetCommandName() -eq 'DgLock-Release' }, $true)).Count -gt 0) })
 [void](Assert-I2A 'S7-lock-released-in-finally' ($releaseInFinally.Count -eq 1) "try/finally blocks that call DgLock-Release: $($releaseInFinally.Count)")
@@ -167,7 +167,10 @@ else {
     $changed = @($b.Keys | Where-Object { (-not $a.ContainsKey($_)) -or ($a[$_] -ne $b[$_]) } | Sort-Object)
     $removed = @($a.Keys | Where-Object { -not $b.ContainsKey($_) })
     # I2-B changes: AllowEmptyTransaction (Begin, Run) and, additively, the report path of a rollback / recovery (ExecuteRecovery, Rollback, Recover, Run)
-    [void](Assert-I2A 'S9-core-changed-functions' ((($changed -join ',') -eq 'DgTx-Begin,DgTx-ExecuteRecovery,DgTx-Recover,DgTx-Rollback,DgTx-Run') -and ($removed.Count -eq 0)) ("changed: $($changed -join ','); removed: $($removed -join ',')"))
+    # I2-D change: the DACL of the common lock (DgLock-NewSecurity); Test-DenGoInstaller-I2D-Static.ps1 guards its content
+    [void](Assert-I2A 'S9-core-changed-functions' ((($changed -join ',') -eq 'DgLock-NewSecurity,DgTx-Begin,DgTx-ExecuteRecovery,DgTx-Recover,DgTx-Rollback,DgTx-Run') -and ($removed.Count -eq 0)) ("changed: $($changed -join ','); removed: $($removed -join ',')"))
+    $secFn = [string]$b['DgLock-NewSecurity']
+    [void](Assert-I2A 'S9-lock-security-is-the-i2d-dacl' (($secFn.Contains('BuiltinAdministratorsSid')) -and ($secFn.Contains('Synchronize')) -and ($secFn.Contains('Modify')) -and ($secFn.Contains('AccessControlType]::Allow')) -and (-not $secFn.Contains('LocalSystemSid')) -and (-not $secFn.Contains('FullControl')) -and (-not $secFn.Contains('Deny'))) 'the only core change besides I2-B: Allow Synchronize|Modify for the current user and Administrators; no SYSTEM, no FullControl, no Deny')
     foreach ($fn in 'DgTx-ExecuteRecovery', 'DgTx-Rollback', 'DgTx-Recover') {
         $fa2 = $a[$fn].Split("`n"); $fb2 = $b[$fn].Split("`n")
         $added = @($fb2 | Where-Object { $fa2 -cnotcontains $_ })
@@ -218,10 +221,22 @@ else {
 }
 # ---------------------------------------------------------------- S11 files that must stay untouched are byte-identical to the I2-A commit
 # (I2-C: Invoke-DenGoUninstaller.ps1 and DenGoUninstallerGui.ps1 are changed by I2-C on purpose; Test-DenGoInstaller-I2C-Static.ps1 guards them)
-foreach ($rel in 'installer/Build-DenGo-SetupExe-2.0.0.ps1', 'installer/scripts/Start-DenGoSetup.ps1', 'installer/scripts/Start-DenGoUninstall.ps1', 'installer/tests/Test-DenGoInstaller-R1A.ps1', 'installer/tests/Test-DenGoInstaller-R1B.ps1', 'installer/tests/Test-DenGoInstaller-I1-Gui.ps1', 'installer/tests/I1.TestSupport.ps1') {
+# (I2-D: Build-DenGo-SetupExe-2.0.0.ps1 is changed by I2-D on purpose - the post-step lock; it is guarded below by a line-level check and by Test-DenGoInstaller-I2D-Static.ps1 / -Wrapper.ps1)
+foreach ($rel in 'installer/scripts/Start-DenGoSetup.ps1', 'installer/scripts/Start-DenGoUninstall.ps1', 'installer/tests/Test-DenGoInstaller-R1A.ps1', 'installer/tests/Test-DenGoInstaller-R1B.ps1', 'installer/tests/Test-DenGoInstaller-I1-Gui.ps1', 'installer/tests/I1.TestSupport.ps1') {
     $base = Get-BaselineText $rel
     if ($null -eq $base) { [void](Assert-I2A ('S11-' + $rel) $true 'baseline unavailable; skipped'); continue }
     [void](Assert-I2A ('S11-unchanged-' + $rel) ($base -eq (Get-CurrentText (Join-Path $repo $rel.Replace('/', '\')))) 'identical to the I2-A commit')
+}
+# I2-D: the setup-EXE builder may only ADD lines, except that the four unlocked post-step calls of the two main() functions move one level deeper (into the lock region).
+# Every other line of the I2-A builder (the I1 result contract, the helper bytes and SHA, the exit codes, the registration) must still be present unchanged.
+$baseBuild = Get-BaselineText 'installer/Build-DenGo-SetupExe-2.0.0.ps1'
+if ($null -eq $baseBuild) { [void](Assert-I2A 'S11-build-baseline' $true 'baseline unavailable; skipped') }
+else {
+    $curBuildLines = @((Get-CurrentText (Join-Path $repo 'installer\Build-DenGo-SetupExe-2.0.0.ps1')).Split("`n"))
+    $removedBuild = @($baseBuild.Split("`n") | Where-Object { $curBuildLines -cnotcontains $_ })
+    $allowedMoved = @('        remove_registration()', '        schedule_self_delete()', '        install_uninstaller(bundle_root)', '        register_uninstaller()')
+    $unexpectedBuild = @($removedBuild | Where-Object { $allowedMoved -cnotcontains $_ })
+    [void](Assert-I2A 'S11-build-only-adds-the-post-step-lock' (($unexpectedBuild.Count -eq 0) -and ($removedBuild.Count -le 4)) ("baseline lines no longer present: $($removedBuild.Count) (allowed: the 4 moved post-step calls); unexpected: $($unexpectedBuild.Count) [$($unexpectedBuild -join ' | ')]"))
 }
 # ---------------------------------------------------------------- S12 QA1: only PROC-01 changed (two single-line replacements)
 $baseQa = Get-BaselineText 'installer/tests/Test-DenGoInstaller-QA1.ps1'

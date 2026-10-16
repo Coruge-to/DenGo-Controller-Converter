@@ -1117,19 +1117,21 @@ function DgTx-Classify {
     return [pscustomobject]@{ State = $state; InstallingMarker = $inst; UninstallingMarker = $unin; StateFileExists = $stateExists; LockHeld = $LockHeld }
 }
 
-# ---------------------------------------------------------------- named mutex (isolated; not wired to any engine)
+# ---------------------------------------------------------------- named mutex (the common Install / Uninstall lock; I2-D contract)
 function DgLock-Registry {
     $v = Get-Variable -Name DgLockRegistry -Scope Script -ErrorAction SilentlyContinue
     if ($null -eq $v) { Set-Variable -Name DgLockRegistry -Scope Script -Value (@{}) ; $v = Get-Variable -Name DgLockRegistry -Scope Script }
     return $v.Value
 }
+# Explicit DACL: Allow for the current user and BUILTIN\Administrators, Synchronize|Modify (0x100001) only. No SYSTEM, no FullControl, no Deny.
+# The setup wrapper (Python OpenMutexW first) opens the object with the same rights.
 function DgLock-NewSecurity {
     $sec = New-Object System.Security.AccessControl.MutexSecurity
     $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
     $adm = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid,$null)
-    $sys = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::LocalSystemSid,$null)
-    foreach ($sid in @($me,$adm,$sys)) {
-        $sec.AddAccessRule((New-Object System.Security.AccessControl.MutexAccessRule($sid,[System.Security.AccessControl.MutexRights]::FullControl,[System.Security.AccessControl.AccessControlType]::Allow)))
+    $rights = [System.Security.AccessControl.MutexRights]([int][System.Security.AccessControl.MutexRights]::Synchronize -bor [int][System.Security.AccessControl.MutexRights]::Modify)
+    foreach ($sid in @($me,$adm)) {
+        $sec.AddAccessRule((New-Object System.Security.AccessControl.MutexAccessRule($sid,$rights,[System.Security.AccessControl.AccessControlType]::Allow)))
     }
     return $sec
 }

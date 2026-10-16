@@ -146,13 +146,13 @@ try {
     $L = New-GlueCase 'glue3' 'P2'
     try {
         $plan = Get-GluePlan $L 'P2'
-        $prodHold = DgLock-TryAcquire 'Local\DenGoControllerConverter.Transaction' 'Explicit'
+        $prodHold = DgLock-TryAcquire 'Global\DenGoControllerConverter.Transaction' 'Explicit'      # the I2-D contract name (the engine child process takes the product name, not the per-process test name)
         try {
             $pre = Get-I2BFullTree $L
             $r = Invoke-Glue $L @{ Apply = $true; RealSystem = $true; DryRun = $false; Shortcut = $false; ShortcutPath = ''; Plan = $plan }
             $j = $r.Json
             $post = Get-I2BFullTree $L
-        } finally { [void](DgLock-Release 'Local\DenGoControllerConverter.Transaction') }
+        } finally { [void](DgLock-Release 'Global\DenGoControllerConverter.Transaction') }
         $glueDiff = @(Compare-I2ATree $pre $post | Where-Object { $_ -notlike '*glue*' -and $_ -notlike '*temp*' -and $_ -notlike '*local\microsoft*' })
         [void](Assert-I2A 'G3-busy-result' (($prodHold.Acquired -eq $true) -and ($null -ne $j) -and ($j.Succeeded -eq $false) -and ($j.ErrorCode -eq 'AnotherOperationRunning') -and ($j.Transaction.LockAcquired -eq $false)) "code=$(if ($null -ne $j) { $j.ErrorCode }) err=[$($r.Err.Trim())]")
         [void](Assert-I2A 'G3-busy-writes-nothing' ($glueDiff.Count -eq 0) "no journal, marker, report, backup or state change (diff=[$($glueDiff -join ' ')])")

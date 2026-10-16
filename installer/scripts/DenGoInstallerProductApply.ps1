@@ -3,13 +3,17 @@
 #
 # Contract summary
 #   - The common lock (DgLock-TryAcquire) is held from the first check to the last result mapping; it is released in finally.
+#   - The lock is the machine-wide mutex Global\DenGoControllerConverter.Transaction (Get-DenGoLockName), taken with the Explicit DACL
+#     (current user and BUILTIN\Administrators: Synchronize|Modify; no SYSTEM, no FullControl). It is never waited for (WaitOne(0)).
+#     A lock that cannot be taken (HeldByOther / AlreadyHeldInProcess / AccessDenied / CreateFailed) fails closed as AnotherOperationRunning
+#     with no change; the reason is kept in the message. An abandoned mutex counts as acquired and is never evidence of an interruption.
 #   - Order: lock -> process gate A -> recovery gate -> previous-state read -> shortcut staging -> plan conversion -> leaf gate -> freshness -> Begin -> Apply -> Commit.
 #   - Every destination is registered in the journal by DgTx-Begin before anything is changed; the product leaf gate allows only fixed leaves.
 #   - PCSX2 / LilyPad items are never part of the transaction (Deferred until I3); they are reported as Action='Deferred'.
 #   - An old-format installing.json is never converted or deleted: LegacyMarkerUnsupported (RepairRequired).
 #   - The ownership merge only adds fields (SchemaVersion stays 1); records that were not part of this plan are carried forward.
 
-function Get-DenGoLockName { return 'Local\DenGoControllerConverter.Transaction' }   # provisional: Global/Local and DACL are decided in I2-D
+function Get-DenGoLockName { return 'Global\DenGoControllerConverter.Transaction' }   # I2-D contract: one machine-wide name for Install and Uninstall (the setup wrapper uses the same name and DACL)
 function DgP-SetOrder { return @('Core','BVE5','BVE6','BveEX Current','AtsEX Legacy','RPCS3','Shortcut') }
 function DgP-ShortcutFileName { return 'DenGo Controller Converter.lnk' }
 function DgP-DefaultTxnIdPattern { return '^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$' }

@@ -114,11 +114,38 @@ $badWr = @($wr | Where-Object { $_.Arguments.Count -eq 0 -or $_.Arguments[0].Ext
 [void](Assert-I2A 'S5-engine-always-writes-a-result' (($engText.Contains('$jsonOutput')) -and ($engText.IndexOf('WriteAllText($jsonOutput', [System.StringComparison]::Ordinal) -gt $engText.IndexOf('Invoke-DenGoProductUninstall', [System.StringComparison]::Ordinal)) -and ($engText -notmatch "throw \('Installed state was not found")) 'no throw before the result file (the old L19 throw is gone)')
 
 # ---------------------------------------------------------------- S6 files that must stay byte-identical to the I2-B commit
-$same = @('installer/scripts/DenGoInstallerTransaction.ps1', 'installer/scripts/DenGoInstallerProductApply.ps1', 'installer/scripts/Invoke-DenGoInstaller.ps1', 'installer/scripts/Start-DenGoSetup.ps1', 'installer/scripts/Start-DenGoUninstall.ps1', 'installer/gui/DenGoInstallerGui.ps1', 'installer/Build-DenGo-SetupExe-2.0.0.ps1', 'installer/tests/I1.TestSupport.ps1', 'installer/tests/I2A.TestSupport.ps1', 'installer/tests/I2B.TestSupport.ps1', 'installer/tests/Test-DenGoInstaller-R1A.ps1', 'installer/tests/Test-DenGoInstaller-R1B.ps1', 'installer/tests/Test-DenGoInstaller-I1-Gui.ps1', 'installer/tests/Test-DenGoInstaller-QA1.ps1')
+# (I2-D: DenGoInstallerTransaction.ps1, DenGoInstallerProductApply.ps1 and Build-DenGo-SetupExe-2.0.0.ps1 are changed by I2-D on purpose - the common lock; they are guarded below by a function-level / line-level check and by the I2-D tests)
+$same = @('installer/scripts/Invoke-DenGoInstaller.ps1', 'installer/scripts/Start-DenGoSetup.ps1', 'installer/scripts/Start-DenGoUninstall.ps1', 'installer/gui/DenGoInstallerGui.ps1', 'installer/tests/I1.TestSupport.ps1', 'installer/tests/I2A.TestSupport.ps1', 'installer/tests/I2B.TestSupport.ps1', 'installer/tests/Test-DenGoInstaller-R1A.ps1', 'installer/tests/Test-DenGoInstaller-R1B.ps1', 'installer/tests/Test-DenGoInstaller-I1-Gui.ps1', 'installer/tests/Test-DenGoInstaller-QA1.ps1')
 foreach ($rel in $same) {
     $base = Get-BaselineText $rel
     if ($null -eq $base) { [void](Assert-I2A ('S6-' + $rel) $true 'baseline unavailable; skipped'); continue }
     [void](Assert-I2A ('S6-unchanged-' + $rel) ($base -eq (Get-CurrentText (Join-Path $repo $rel.Replace('/', '\')))) 'identical to the I2-B commit')
+}
+# I2-D: the two engine layers may differ from the I2-B commit only in ONE function each (the lock name / the lock DACL). Everything else - every other function and
+# all code outside the functions (comments excluded) - must be identical to the I2-B commit.
+foreach ($pair in @(@('installer/scripts/DenGoInstallerTransaction.ps1', 'DgLock-NewSecurity'), @('installer/scripts/DenGoInstallerProductApply.ps1', 'Get-DenGoLockName'))) {
+    $rel = $pair[0]; $allowedFn = $pair[1]
+    $base = Get-BaselineText $rel
+    if ($null -eq $base) { [void](Assert-I2A ('S6-' + $rel) $true 'baseline unavailable; skipped'); continue }
+    $cur = Get-CurrentText (Join-Path $repo $rel.Replace('/', '\'))
+    $fa = Get-FunctionTexts $base; $fb = Get-FunctionTexts $cur
+    $changedFns = @($fb.Keys | Where-Object { (-not $fa.ContainsKey($_)) -or ($fa[$_] -ne $fb[$_]) } | Sort-Object)
+    $removedFns = @($fa.Keys | Where-Object { -not $fb.ContainsKey($_) })
+    $restA = $base; $restB = $cur
+    if ($fa.ContainsKey($allowedFn) -and $fb.ContainsKey($allowedFn)) { $restA = $base.Replace($fa[$allowedFn], ''); $restB = $cur.Replace($fb[$allowedFn], '') }
+    $codeA = @($restA.Split("`n") | Where-Object { $_.Trim().Length -gt 0 -and -not $_.TrimStart().StartsWith('#') })
+    $codeB = @($restB.Split("`n") | Where-Object { $_.Trim().Length -gt 0 -and -not $_.TrimStart().StartsWith('#') })
+    [void](Assert-I2A ('S6-i2d-single-function-change-' + $rel) ((($changedFns -join ',') -eq $allowedFn) -and ($removedFns.Count -eq 0) -and (($codeA -join "`n") -ceq ($codeB -join "`n"))) ("changed functions: $($changedFns -join ','); removed: $($removedFns -join ','); code outside the function identical (comments excluded): $((($codeA -join "`n") -ceq ($codeB -join "`n")))"))
+}
+# I2-D: the setup-EXE builder may only ADD lines, except that the four post-step calls of the two main() functions move one level deeper (into the lock region)
+$baseBuild = Get-BaselineText 'installer/Build-DenGo-SetupExe-2.0.0.ps1'
+if ($null -eq $baseBuild) { [void](Assert-I2A 'S6-build-baseline' $true 'baseline unavailable; skipped') }
+else {
+    $curBuildLines = @((Get-CurrentText (Join-Path $repo 'installer\Build-DenGo-SetupExe-2.0.0.ps1')).Split("`n"))
+    $removedBuild = @($baseBuild.Split("`n") | Where-Object { $curBuildLines -cnotcontains $_ })
+    $allowedMoved = @('        remove_registration()', '        schedule_self_delete()', '        install_uninstaller(bundle_root)', '        register_uninstaller()')
+    $unexpectedBuild = @($removedBuild | Where-Object { $allowedMoved -cnotcontains $_ })
+    [void](Assert-I2A 'S6-i2d-build-only-adds-the-post-step-lock' (($unexpectedBuild.Count -eq 0) -and ($removedBuild.Count -le 4)) ("baseline lines no longer present: $($removedBuild.Count) (allowed: the 4 moved post-step calls); unexpected: $($unexpectedBuild.Count) [$($unexpectedBuild -join ' | ')]"))
 }
 
 # ---------------------------------------------------------------- S7 the GUI change is local (the residual notice only)

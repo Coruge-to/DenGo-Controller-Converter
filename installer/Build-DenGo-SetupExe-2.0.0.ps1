@@ -112,6 +112,7 @@ import sys
 import tempfile
 import time
 import zipfile
+from ctypes import wintypes
 
 EXPECTED_ZIP_SHA256 = "__ZIP_SHA__"
 EXPECTED_SOURCE_COMMIT = "__COMMIT__"
@@ -295,6 +296,188 @@ def cleanup(path):
             return
         except Exception:
             time.sleep(0.2)
+
+# ---- post-step lock (I2-D) ----
+# The engine (PowerShell) holds LOCK_NAME for the whole of an Install / Uninstall. The wrapper holds the SAME mutex only for the post step:
+# from the state re-verification after the engine has ended, through the registration / un-registration, until the self-delete helper is started.
+# It is never held while the engine runs or while a wizard waits. The DACL is the engine's: Allow Synchronize|Modify for the current user and
+# BUILTIN\Administrators only. CreateMutexW demands MUTEX_ALL_ACCESS on an existing object and fails against that DACL, so OpenMutexW comes first.
+LOCK_NAME = "Global\\DenGoControllerConverter.Transaction"
+LOCK_ACCESS = 0x00100001
+LOCK_SDDL_TEMPLATE = "D:(A;;0x100001;;;{user})(A;;0x100001;;;BA)"
+POST_STEP_LOCK_TIMEOUT_SECONDS = 120
+POST_STEP_LOCK_POLL_SECONDS = 0.2
+ERROR_FILE_NOT_FOUND = 2
+ERROR_ACCESS_DENIED = 5
+ERROR_ALREADY_EXISTS = 183
+WAIT_OBJECT_0 = 0
+WAIT_ABANDONED = 0x80
+WAIT_TIMEOUT = 0x102
+
+kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+
+class SECURITY_ATTRIBUTES(ctypes.Structure):
+    _fields_ = [("nLength", wintypes.DWORD), ("lpSecurityDescriptor", ctypes.c_void_p), ("bInheritHandle", wintypes.BOOL)]
+
+kernel32.OpenMutexW.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR]
+kernel32.OpenMutexW.restype = wintypes.HANDLE
+kernel32.CreateMutexW.argtypes = [ctypes.POINTER(SECURITY_ATTRIBUTES), wintypes.BOOL, wintypes.LPCWSTR]
+kernel32.CreateMutexW.restype = wintypes.HANDLE
+kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+kernel32.WaitForSingleObject.restype = wintypes.DWORD
+kernel32.ReleaseMutex.argtypes = [wintypes.HANDLE]
+kernel32.ReleaseMutex.restype = wintypes.BOOL
+kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+kernel32.CloseHandle.restype = wintypes.BOOL
+kernel32.GetCurrentProcess.argtypes = []
+kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+kernel32.LocalFree.restype = ctypes.c_void_p
+advapi32.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
+advapi32.OpenProcessToken.restype = wintypes.BOOL
+advapi32.GetTokenInformation.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
+advapi32.GetTokenInformation.restype = wintypes.BOOL
+advapi32.ConvertSidToStringSidW.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.LPWSTR)]
+advapi32.ConvertSidToStringSidW.restype = wintypes.BOOL
+advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(wintypes.DWORD)]
+advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW.restype = wintypes.BOOL
+
+class PostStepLockError(Exception):
+    def __init__(self, reason, detail):
+        Exception.__init__(self, reason + ": " + detail)
+        self.reason = reason
+        self.detail = detail
+
+def current_user_sid():
+    token = wintypes.HANDLE()
+    if not advapi32.OpenProcessToken(kernel32.GetCurrentProcess(), 0x0008, ctypes.byref(token)):
+        raise OSError("OpenProcessToken failed (Win32 error {})".format(ctypes.get_last_error()))
+    try:
+        size = wintypes.DWORD(0)
+        advapi32.GetTokenInformation(token, 1, None, 0, ctypes.byref(size))
+        buffer = ctypes.create_string_buffer(size.value)
+        if not advapi32.GetTokenInformation(token, 1, buffer, size, ctypes.byref(size)):
+            raise OSError("GetTokenInformation failed (Win32 error {})".format(ctypes.get_last_error()))
+        text = wintypes.LPWSTR()
+        if not advapi32.ConvertSidToStringSidW(ctypes.c_void_p.from_buffer(buffer).value, ctypes.byref(text)):
+            raise OSError("ConvertSidToStringSidW failed (Win32 error {})".format(ctypes.get_last_error()))
+        try:
+            return text.value
+        finally:
+            kernel32.LocalFree(ctypes.cast(text, ctypes.c_void_p))
+    finally:
+        kernel32.CloseHandle(token)
+
+def lock_failure_reason(error):
+    # An object that exists but cannot be opened is never waited for: it can only be a hostile or foreign DACL.
+    return "PostStepLockAccessDenied" if error == ERROR_ACCESS_DENIED else "PostStepLockCreateFailed"
+
+def acquire_post_step_lock():
+    # Returns an OWNED mutex handle (release it with release_post_step_lock on the same thread) or raises PostStepLockError. Bounded.
+    handle = None
+    try:
+        for _ in range(3):
+            handle = kernel32.OpenMutexW(LOCK_ACCESS, False, LOCK_NAME)
+            if handle:
+                break
+            error = ctypes.get_last_error()
+            if error != ERROR_FILE_NOT_FOUND:
+                raise PostStepLockError(lock_failure_reason(error), "OpenMutexW failed (Win32 error {})".format(error))
+            descriptor = ctypes.c_void_p()
+            create_error = 0
+            try:
+                sddl = LOCK_SDDL_TEMPLATE.format(user=current_user_sid())
+                if not advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, 1, ctypes.byref(descriptor), None):
+                    raise OSError("ConvertStringSecurityDescriptorToSecurityDescriptorW failed (Win32 error {})".format(ctypes.get_last_error()))
+                attributes = SECURITY_ATTRIBUTES(ctypes.sizeof(SECURITY_ATTRIBUTES), descriptor, False)
+                handle = kernel32.CreateMutexW(ctypes.byref(attributes), False, LOCK_NAME)
+                create_error = ctypes.get_last_error()
+            finally:
+                if descriptor.value:
+                    kernel32.LocalFree(descriptor)
+            if handle:
+                break
+            if create_error not in (ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS):
+                raise PostStepLockError("PostStepLockCreateFailed", "CreateMutexW failed (Win32 error {})".format(create_error))
+            # someone created it between the two calls: open the object that now exists
+            handle = kernel32.OpenMutexW(LOCK_ACCESS, False, LOCK_NAME)
+            if handle:
+                break
+            error = ctypes.get_last_error()
+            if error != ERROR_FILE_NOT_FOUND:
+                raise PostStepLockError(lock_failure_reason(error), "OpenMutexW failed after a creation race (Win32 error {})".format(error))
+        if not handle:
+            raise PostStepLockError("PostStepLockCreateFailed", "the lock object could not be settled")
+        deadline = time.monotonic() + POST_STEP_LOCK_TIMEOUT_SECONDS
+        while True:
+            result = kernel32.WaitForSingleObject(handle, 0)
+            if result in (WAIT_OBJECT_0, WAIT_ABANDONED):
+                return handle
+            if result != WAIT_TIMEOUT:
+                raise PostStepLockError("PostStepLockCreateFailed", "WaitForSingleObject returned {}".format(result))
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise PostStepLockError("PostStepLockTimeout", "another operation held the lock for {} seconds".format(POST_STEP_LOCK_TIMEOUT_SECONDS))
+            time.sleep(min(POST_STEP_LOCK_POLL_SECONDS, remaining))
+    except PostStepLockError:
+        if handle:
+            kernel32.CloseHandle(handle)
+        raise
+    except Exception as exc:
+        if handle:
+            kernel32.CloseHandle(handle)
+        raise PostStepLockError("PostStepLockCreateFailed", str(exc))
+
+def release_post_step_lock(handle):
+    if not handle:
+        return
+    try:
+        kernel32.ReleaseMutex(handle)
+    finally:
+        kernel32.CloseHandle(handle)
+
+def verify_state_locked(operation):
+    # Runs while the lock is held: the state must still be exactly what the engine committed. Anything else means another operation touched it.
+    try:
+        root = state_root()
+        installing = os.path.lexists(os.path.join(root, "installing.json"))
+        uninstalling = os.path.lexists(os.path.join(root, "uninstalling.json"))
+        if operation == "Install":
+            if installing or uninstalling:
+                return False, "PostStepStateChanged"
+            if not os.path.isfile(os.path.join(root, "installed-state.json")):
+                return False, "PostStepStateChanged"
+            if not os.path.isfile(os.path.join(PRODUCT_DIR, "DenGoControllerConverter.exe")):
+                return False, "PostStepStateChanged"
+            return True, "Completed"
+        if uninstalling or os.path.lexists(os.path.join(root, "installed-state.json")):
+            return False, "PostStepStateChanged"
+        if not os.path.isfile(os.path.join(root, "uninstalled-state.json")):
+            return False, "PostStepStateChanged"
+        return True, "Completed"
+    except Exception:
+        return False, "PostStepStateChanged"
+
+def post_step_message(operation, reason, detail):
+    install = operation == "Install"
+    if reason == "PostStepStateChanged":
+        head = "\u30BB\u30C3\u30C8\u30A2\u30C3\u30D7\u306E\u5B8C\u4E86\u5F8C\u306B\u30A4\u30F3\u30B9\u30C8\u30FC\u30EB\u72B6\u614B\u304C\u5909\u5316\u3057\u305F\u305F\u3081\u3001\u30A2\u30F3\u30A4\u30F3\u30B9\u30C8\u30FC\u30E9\u30FC\u306E\u767B\u9332\u306F\u884C\u3044\u307E\u305B\u3093\u3067\u3057\u305F\u3002"
+        if not install:
+            head = "\u30A2\u30F3\u30A4\u30F3\u30B9\u30C8\u30FC\u30EB\u306E\u5B8C\u4E86\u5F8C\u306B\u30A4\u30F3\u30B9\u30C8\u30FC\u30EB\u72B6\u614B\u304C\u5909\u5316\u3057\u305F\u305F\u3081\u3001\u30A2\u30F3\u30A4\u30F3\u30B9\u30C8\u30FC\u30E9\u30FC\u306E\u767B\u9332\u89E3\u9664\u3068\u81EA\u5DF1\u524A\u9664\u306F\u884C\u3044\u307E\u305B\u3093\u3067\u3057\u305F\u3002"
+        return head + "\n\u4ED6\u306E\u51E6\u7406\u304C\u5B9F\u884C\u4E2D\u3067\u306A\u3044\u3053\u3068\u3092\u78BA\u8A8D\u3057\u3066\u3001\u3082\u3046\u4E00\u5EA6\u5B9F\u884C\u3057\u3066\u304F\u3060\u3055\u3044\u3002\n\n" + reason
+    if reason == "PostStepLockTimeout":
+        head = "\u4ED6\u306E\u30BB\u30C3\u30C8\u30A2\u30C3\u30D7\u307E\u305F\u306F\u30A2\u30F3\u30A4\u30F3\u30B9\u30C8\u30FC\u30EB\u304C\u5B9F\u884C\u4E2D\u306E\u305F\u3081\u3001\u5B8C\u4E86\u51E6\u7406\u3092\u5F85\u6A5F\u3057\u307E\u3057\u305F\u304C\u3001\u6642\u9593\u5185\u306B\u958B\u59CB\u3067\u304D\u307E\u305B\u3093\u3067\u3057\u305F\u3002"
+    else:
+        head = "\u4ED6\u306E\u30BB\u30C3\u30C8\u30A2\u30C3\u30D7\u307E\u305F\u306F\u30A2\u30F3\u30A4\u30F3\u30B9\u30C8\u30FC\u30EB\u3068\u306E\u6392\u4ED6\u5236\u5FA1\u3092\u78BA\u8A8D\u3067\u304D\u307E\u305B\u3093\u3067\u3057\u305F\u3002"
+    if install:
+        not_done = "\u30A2\u30F3\u30A4\u30F3\u30B9\u30C8\u30FC\u30E9\u30FC\u306E\u767B\u9332\u306F\u884C\u3063\u3066\u3044\u307E\u305B\u3093\u3002"
+    else:
+        not_done = "\u30A2\u30F3\u30A4\u30F3\u30B9\u30C8\u30FC\u30E9\u30FC\u306E\u767B\u9332\u89E3\u9664\u3068\u81EA\u5DF1\u524A\u9664\u306F\u884C\u3063\u3066\u3044\u307E\u305B\u3093\u3002"
+    text = head + "\n" + not_done + "\n\u4ED6\u306E\u51E6\u7406\u304C\u5B9F\u884C\u4E2D\u3067\u306A\u3044\u3053\u3068\u3092\u78BA\u8A8D\u3057\u3066\u3001\u3082\u3046\u4E00\u5EA6\u5B9F\u884C\u3057\u3066\u304F\u3060\u3055\u3044\u3002\n\nAnotherOperationRunning: " + reason
+    if detail:
+        text += " (" + detail + ")"
+    return text
 '@
 
     $uninstallMain = @'
@@ -360,8 +543,24 @@ def main():
             if is_contract_violation(reason):
                 message("\u30A2\u30F3\u30A4\u30F3\u30B9\u30C8\u30FC\u30EB\u306E\u7D50\u679C\u3092\u78BA\u8A8D\u3067\u304D\u307E\u305B\u3093\u3067\u3057\u305F\u3002\n\u767B\u9332\u3068\u30A2\u30F3\u30A4\u30F3\u30B9\u30C8\u30FC\u30E9\u30FC\u306F\u5909\u66F4\u3057\u3066\u3044\u307E\u305B\u3093\u3002")
             return EXIT_FAILED
-        remove_registration()
-        schedule_self_delete()
+        try:
+            lock_handle = acquire_post_step_lock()
+        except PostStepLockError as lock_error:
+            message(post_step_message("Uninstall", lock_error.reason, lock_error.detail))
+            return EXIT_FAILED
+        failure = None
+        try:
+            consistent, why = verify_state_locked("Uninstall")
+            if consistent:
+                remove_registration()
+                schedule_self_delete()
+            else:
+                failure = why
+        finally:
+            release_post_step_lock(lock_handle)
+        if failure is not None:
+            message(post_step_message("Uninstall", failure, ""))
+            return EXIT_FAILED
         return EXIT_COMPLETED
     except Exception as exc:
         return fail("\u51E6\u7406\u4E2D\u306B\u30A8\u30E9\u30FC\u304C\u767A\u751F\u3057\u307E\u3057\u305F\u3002\n" + str(exc))
@@ -430,8 +629,24 @@ def main():
             if is_contract_violation(reason):
                 message("\u30BB\u30C3\u30C8\u30A2\u30C3\u30D7\u306E\u7D50\u679C\u3092\u78BA\u8A8D\u3067\u304D\u307E\u305B\u3093\u3067\u3057\u305F\u3002\n\u30A2\u30F3\u30A4\u30F3\u30B9\u30C8\u30FC\u30E9\u30FC\u306E\u767B\u9332\u306F\u884C\u3044\u307E\u305B\u3093\u3002")
             return EXIT_FAILED
-        install_uninstaller(bundle_root)
-        register_uninstaller()
+        try:
+            lock_handle = acquire_post_step_lock()
+        except PostStepLockError as lock_error:
+            message(post_step_message("Install", lock_error.reason, lock_error.detail))
+            return EXIT_FAILED
+        failure = None
+        try:
+            consistent, why = verify_state_locked("Install")
+            if consistent:
+                install_uninstaller(bundle_root)
+                register_uninstaller()
+            else:
+                failure = why
+        finally:
+            release_post_step_lock(lock_handle)
+        if failure is not None:
+            message(post_step_message("Install", failure, ""))
+            return EXIT_FAILED
         return EXIT_COMPLETED
     except Exception as exc:
         return fail("\u51E6\u7406\u4E2D\u306B\u30A8\u30E9\u30FC\u304C\u767A\u751F\u3057\u307E\u3057\u305F\u3002\n" + str(exc))
