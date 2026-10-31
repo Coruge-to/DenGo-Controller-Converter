@@ -8,12 +8,15 @@
 #   - Only fixed DenGo leaves below proven roots are ever touched. Anything that is not a DenGo leaf stops the run with zero changes.
 #   - Restore uses the Origin backup only (Backup == Backups[0] for transaction backups); Backups[1..] are never a restore source;
 #     the backup of a closed generation is never used by a newer generation.
-#   - PCSX2 / LilyPad records are deferred (I3): never read, restored, deleted or moved to ClosedRecords. ClosedRecords are never applied.
+#   - PCSX2 1.6.0 / LilyPad (I3) is the real role Pcsx2 with the same table as every other record. LilyPad.ini that an explicit consent replaced
+#     (ReplacedExisting) is restored from its Origin by default, whatever IncludeInputProfiles says; the .lily profile and every other profile keep the
+#     I2-C default (kept). A PCSX2 record is never moved to ClosedRecords. ClosedRecords are never applied. DeferredRecords of a CLOSED generation
+#     (written by I2-C) are only carried verbatim by a re-confirmation; a new generation has none.
 #   - A user-owned file that is intentionally left behind is a residual (Completed is allowed). A DenGo-owned item that cannot be resolved
 #     (unproven root, invalid Origin, contamination that blocks a restore, unknown ownership) fails the run with zero changes.
 #   - A recovery that only succeeded (RolledBack / RolledForward) is never a completed uninstall: Failed + RecoveryCompletedOperationNotCompleted.
 
-function DgU-SetOrder { return @('RPCS3','AtsEX Legacy','BveEX Current','BVE6','BVE5','Core') }
+function DgU-SetOrder { return @('PCSX2','RPCS3','AtsEX Legacy','BveEX Current','BVE6','BVE5','Core') }
 function DgU-OwnershipNames { return @('CreatedByInstaller','MigratedMatchingDenGoFile','ReplacedExisting','PreservedUserFile','NotInstalled','NotManaged') }
 function DgU-ArchivePattern { return '^(installed|uninstalled)-state\.[0-9a-f]{64}\.json$' }
 function DgU-IsHex64 { param([string]$Text) return ($Text -match '^[0-9A-Fa-f]{64}$') }
@@ -334,8 +337,6 @@ function Test-DenGoVolumeAvailable {
 function Get-DenGoUninstallShape {
     param([object]$Layout,[string]$Platform,[string]$Destination)
     $r = [pscustomobject]@{ Ok = $false; Reason = ''; Role = ''; Root = ''; Set = ''; Deferred = $false; Full = '' }
-    # a PCSX2 / LilyPad record is deferred whatever else it says: it is never read, so even a malformed one cannot stop an uninstall
-    if (DgEq $Platform 'PCSX2') { $r.Role = 'Deferred'; $r.Set = 'PCSX2'; $r.Deferred = $true; $r.Ok = $true; return $r }
     $c = DgPath-Check $Destination
     if (-not $c.Ok) { $r.Reason = 'Path:' + $c.Reason; return $r }
     $full = DgP-Full $c.Normalized
@@ -343,7 +344,6 @@ function Get-DenGoUninstallShape {
     $m = $null
     try { $m = DgP-MapPlatform $Platform $full } catch { $r.Reason = 'PlatformUnsupported'; return $r }
     $r.Role = [string]$m.Role; $r.Root = [string]$m.Root; $r.Set = [string]$m.Set; $r.Deferred = [bool]$m.Deferred
-    if ($r.Deferred) { $r.Ok = $true; return $r }
     $leaf = [System.IO.Path]::GetFileName($full)
     $parent = [System.IO.Path]::GetDirectoryName($full)
     $fixedRoot = ''
@@ -362,6 +362,9 @@ function Get-DenGoUninstallShape {
         $fixedRoot = [string]$Layout.LegacyExt
     } elseif (DgEq $r.Role 'Rpcs3') {
         if (-not ((DgEqI $leaf 'Den-Go-Controller.yml') -and $parent.EndsWith('\config\input_configs\global',[System.StringComparison]::OrdinalIgnoreCase))) { $r.Reason = 'LeafNotFixed'; return $r }
+        $fixedRoot = $parent
+    } elseif (DgEq $r.Role 'Pcsx2') {
+        if (-not (((DgEqI $leaf 'LilyPad.ini') -or (DgEqI $leaf 'DenGo-Controller-Converter.lily')) -and (DgEqI ([System.IO.Path]::GetFileName($parent)) 'inis'))) { $r.Reason = 'LeafNotFixed'; return $r }
         $fixedRoot = $parent
     } else { $r.Reason = 'RoleUnsupported'; return $r }
     $rp = DgFs-GetReparseComponents $full $fixedRoot
@@ -444,12 +447,14 @@ function Get-DenGoUninstallFileDecision {
     try {
         $shape = Get-DenGoUninstallShape $Layout $platform $dest
         $d.Role = $shape.Role; $d.Root = $shape.Root; $d.Set = $shape.Set
-        if ($shape.Deferred) { return (DgU-Leave $d 'Deferred' 'DeferredToI3' 'PCSX2 / LilyPad records are deferred to I3 and are not touched.') }
         $isProfile = DgEq $component 'InputProfile'
         $isEffective = DgEq $component 'EffectiveInputProfile'
         $known = (DgU-OwnershipNames) -ccontains $own
         $owning = Test-DenGoOwningOwnership $own
-        if (($isProfile -or $isEffective) -and -not $IncludeProfiles -and $known) { return (DgU-Leave $d 'KeepProfile' 'ProfileKept' 'Input profiles are preserved by default.') }
+        # DE-I3-3: the LilyPad.ini of PCSX2 1.6.0 that an explicit consent replaced (ReplacedExisting) is restored by default. Nothing else changes the
+        # I2-C default: the .lily profile, the RPCS3 profile and a PCSX2 LilyPad.ini without an Origin (MigratedMatchingDenGoFile / CreatedByInstaller) are kept.
+        $restoreByDefault = ((DgEq $shape.Role 'Pcsx2') -and $isEffective -and (DgEq $own 'ReplacedExisting'))
+        if (($isProfile -or $isEffective) -and -not $IncludeProfiles -and $known -and -not $restoreByDefault) { return (DgU-Leave $d 'KeepProfile' 'ProfileKept' 'Input profiles are preserved by default.') }
         if (-not $known) { return (DgU-Block $d 'UnsafeOrUnknown' 'UnsafeOrUnknown' 'The ownership value is not recognized.') }
         if (-not $owning) {
             # a user-owned or not-managed record is never touched: a record that is not a DenGo leaf is only reported

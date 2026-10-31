@@ -70,7 +70,12 @@ $comObj = @($pa.FindAll({ param($x) $x -is [System.Management.Automation.Languag
 
 # ---------------------------------------------------------------- S3 PCSX2 / LilyPad stay deferred; no UninstallRollback; no GC
 $strs = @($pa.FindAll({ param($x) $x -is [System.Management.Automation.Language.StringConstantExpressionAst] }, $true) | ForEach-Object { $_.Value })
-[void](Assert-I2A 'S3-no-lilypad-string' (@($strs | Where-Object { $_ -match 'LilyPad\.|\.lily|\.ini\b' }).Count -eq 0) 'no LilyPad.ini / .lily / .ini file name appears in the uninstall layer (the deferral message may name LilyPad)')
+# I3-D follow-up: since I3 the uninstall layer names exactly the two FIXED PCSX2 leaves (LilyPad.ini and the DenGo .lily), and only inside Get-DenGoUninstallShape (the shape of what may be removed or restored).
+# Any other file name literal (PCSX2.ini, GSdx.ini, ...) or the same literal in another function fails.
+$fileNameLits = @($pa.FindAll({ param($x) $x -is [System.Management.Automation.Language.StringConstantExpressionAst] -and $x.Value -match 'LilyPad\.|\.lily|\.ini\b' }, $true))
+$fileNameValues = @($fileNameLits | ForEach-Object { [string]$_.Value } | Sort-Object -Unique)
+$fileNameOwners = @($fileNameLits | ForEach-Object { $o = $_.Parent; while (($null -ne $o) -and ($o -isnot [System.Management.Automation.Language.FunctionDefinitionAst])) { $o = $o.Parent }; $(if ($null -eq $o) { '' } else { [string]$o.Name }) } | Sort-Object -Unique)
+[void](Assert-I2A 'S3-no-lilypad-string' (($fileNameValues.Count -eq 2) -and ($fileNameValues -ccontains 'LilyPad.ini') -and ($fileNameValues -ccontains 'DenGo-Controller-Converter.lily') -and ($fileNameOwners.Count -eq 1) -and ($fileNameOwners[0] -ceq 'Get-DenGoUninstallShape')) ("file name literals in the uninstall layer: [$($fileNameValues -join ' | ')] in function(s): [$($fileNameOwners -join ',')] - exactly the two fixed PCSX2 leaves, only in Get-DenGoUninstallShape"))
 $pcsx2Strings = @($strs | Where-Object { $_ -match 'PCSX2|Pcsx2' })
 [void](Assert-I2A 'S3-pcsx2-only-as-the-deferral-test' (($pcsx2Strings.Count -le 3) -and (@($pcsx2Strings | Where-Object { $_ -notin @('PCSX2') -and $_ -notmatch 'PCSX2 / LilyPad|PCSX2' }).Count -eq 0)) ('PCSX2 strings: ' + ($pcsx2Strings -join ' | ')))
 $roleFn = Get-Fn $pa 'Get-DenGoUninstallRoleSpec'
@@ -115,15 +120,74 @@ $badWr = @($wr | Where-Object { $_.Arguments.Count -eq 0 -or $_.Arguments[0].Ext
 
 # ---------------------------------------------------------------- S6 files that must stay byte-identical to the I2-B commit
 # (I2-D: DenGoInstallerTransaction.ps1, DenGoInstallerProductApply.ps1 and Build-DenGo-SetupExe-2.0.0.ps1 are changed by I2-D on purpose - the common lock; they are guarded below by a function-level / line-level check and by the I2-D tests)
-$same = @('installer/scripts/Invoke-DenGoInstaller.ps1', 'installer/scripts/Start-DenGoSetup.ps1', 'installer/scripts/Start-DenGoUninstall.ps1', 'installer/gui/DenGoInstallerGui.ps1', 'installer/tests/I1.TestSupport.ps1', 'installer/tests/I2A.TestSupport.ps1', 'installer/tests/I2B.TestSupport.ps1', 'installer/tests/Test-DenGoInstaller-R1A.ps1', 'installer/tests/Test-DenGoInstaller-R1B.ps1', 'installer/tests/Test-DenGoInstaller-I1-Gui.ps1', 'installer/tests/Test-DenGoInstaller-QA1.ps1')
+$same = @('installer/scripts/Start-DenGoSetup.ps1', 'installer/scripts/Start-DenGoUninstall.ps1', 'installer/tests/I1.TestSupport.ps1', 'installer/tests/I2A.TestSupport.ps1', 'installer/tests/I2B.TestSupport.ps1', 'installer/tests/Test-DenGoInstaller-R1A.ps1', 'installer/tests/Test-DenGoInstaller-R1B.ps1', 'installer/tests/Test-DenGoInstaller-I1-Gui.ps1')
 foreach ($rel in $same) {
     $base = Get-BaselineText $rel
     if ($null -eq $base) { [void](Assert-I2A ('S6-' + $rel) $true 'baseline unavailable; skipped'); continue }
     [void](Assert-I2A ('S6-unchanged-' + $rel) ($base -eq (Get-CurrentText (Join-Path $repo $rel.Replace('/', '\')))) 'identical to the I2-B commit')
 }
+# I3-D follow-up: three files that were "identical to the I2-B commit" are changed by I3 on purpose (PCSX2 1.6.0 / LilyPad became a Set). Each is guarded by a FIXED set of functions
+# (changed / new / removed must match exactly - an unlisted function that changes fails) and by a check of everything outside those functions.
+function Get-TextWithoutFunctions([string]$Text, [string[]]$Names) {
+    $tk = $null; $er = $null
+    $ast2 = [System.Management.Automation.Language.Parser]::ParseInput($Text, [ref]$tk, [ref]$er)
+    $spans = @($ast2.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true) | Where-Object { $Names -ccontains $_.Name } | Sort-Object { $_.Extent.StartOffset } -Descending)
+    $t2 = $Text
+    foreach ($s in $spans) { $st = $s.Extent.StartOffset; $en = $s.Extent.EndOffset; if (($st -gt 0) -and ($t2[$st - 1] -eq ';')) { $st-- }; $t2 = $t2.Substring(0, $st) + $t2.Substring($en) }
+    return (@($t2.Split("`n") | Where-Object { $_.Trim() -ne '' }) -join "`n")
+}
+function Get-FunctionSetChange([string]$BaseText, [string]$CurText) {
+    $fa0 = Get-FunctionTexts $BaseText; $fb0 = Get-FunctionTexts $CurText
+    return [pscustomobject]@{
+        Changed = @($fb0.Keys | Where-Object { $fa0.ContainsKey($_) -and ($fa0[$_] -ne $fb0[$_]) } | Sort-Object)
+        New = @($fb0.Keys | Where-Object { -not $fa0.ContainsKey($_) } | Sort-Object)
+        Removed = @($fa0.Keys | Where-Object { -not $fb0.ContainsKey($_) } | Sort-Object)
+    }
+}
+# installer GUI: the result row, the unsupported dialog, the unsupported test and the process-name rule (Test-Pcsx2Status is the one new function)
+$relGui = 'installer/gui/DenGoInstallerGui.ps1'
+$baseG = Get-BaselineText $relGui
+if ($null -eq $baseG) { [void](Assert-I2A ('S6-unchanged-' + $relGui) $true 'baseline unavailable; skipped') }
+else {
+    $curG = Get-CurrentText (Join-Path $repo $relGui.Replace('/', '\'))
+    $chg = Get-FunctionSetChange $baseG $curG
+    $guiAllowedChanged = @('Get-RunningProductNames', 'Has-UnsupportedCurrentPCSX2', 'Show-Results', 'Show-UnsupportedPCSX2Dialog'); $guiAllowedNew = @('Test-Pcsx2Status')
+    $outsideSame = ((Get-TextWithoutFunctions $baseG ($guiAllowedChanged + $guiAllowedNew)) -ceq (Get-TextWithoutFunctions $curG ($guiAllowedChanged + $guiAllowedNew)))
+    [void](Assert-I2A ('S6-unchanged-' + $relGui) ((($chg.Changed -join ',') -ceq (($guiAllowedChanged | Sort-Object) -join ',')) -and (($chg.New -join ',') -ceq ($guiAllowedNew -join ',')) -and ($chg.Removed.Count -eq 0) -and $outsideSame) ("changed: $($chg.Changed -join ','); new: $($chg.New -join ','); removed: $($chg.Removed -join ','); everything outside them identical to the I2-B commit: $outsideSame"))
+}
+# engine: only Get-RunningTargetProducts (the process-name rule) is a function change; the rest of the PCSX2 integration is script-body code, so every added or removed LINE must be about PCSX2 / its detection / its plan
+$relEng = 'installer/scripts/Invoke-DenGoInstaller.ps1'
+$baseE = Get-BaselineText $relEng
+if ($null -eq $baseE) { [void](Assert-I2A ('S6-unchanged-' + $relEng) $true 'baseline unavailable; skipped') }
+else {
+    $curE = Get-CurrentText (Join-Path $repo $relEng.Replace('/', '\'))
+    $chg = Get-FunctionSetChange $baseE $curE
+    $engineLine = '(?i)pcsx2|portable|LilyPad|legacyIni|currentIni|currentText|configurationRoot|dedicatedProfileName|activeProfileSource|DetectedButNotInitialized|groupEntry|supportStatus|detectedRow|detected\.Add|effectiveInputProfile|profileDirectory|DenGoUninstallerProductApply|closedGeneration|CurrentIntegrated|\$detected = New-Object|planBackupRoot|^\s*# read only\. An unreadable state|^\$transactionInfo = \$null;\$recoveryInfo = \$null;\$deferredItems = \[object\[\]\]@\(\)$|^\s*\}\s*$|^\s*\}\s*(else|elseif)\b|^\s*$'
+    $lb0 = $baseE.Split("`n"); $la0 = $curE.Split("`n")
+    $lostE = @($lb0 | Where-Object { $la0 -cnotcontains $_ }); $addedE = @($la0 | Where-Object { $lb0 -cnotcontains $_ })
+    $lostOther = @($lostE | Where-Object { $_ -notmatch $engineLine }); $addedOther = @($addedE | Where-Object { $_ -notmatch $engineLine })
+    [void](Assert-I2A ('S6-unchanged-' + $relEng) ((($chg.Changed -join ',') -ceq 'Get-RunningTargetProducts') -and ($chg.New.Count -eq 0) -and ($chg.Removed.Count -eq 0) -and ($lostOther.Count -eq 0) -and ($addedOther.Count -eq 0) -and ($lostE.Count -gt 0) -and ($addedE.Count -gt 0)) ("changed functions: $($chg.Changed -join ','); new: $($chg.New -join ','); removed: $($chg.Removed -join ','); lines removed $($lostE.Count) / added $($addedE.Count); not about PCSX2: removed $($lostOther.Count) / added $($addedOther.Count)"))
+}
+# QA1: the I3 follow-up set (see Test-DenGoInstaller-I2B-Static.ps1 S12): every QA1 line outside the PROC-01 and PCSX2 assertions is still the I2-B commit's
+$relQa = 'installer/tests/Test-DenGoInstaller-QA1.ps1'
+$baseQ = Get-BaselineText $relQa
+if ($null -eq $baseQ) { [void](Assert-I2A ('S6-unchanged-' + $relQa) $true 'baseline unavailable; skipped') }
+else {
+    $qa = (Get-CurrentText (Join-Path $repo $relQa.Replace('/', '\'))).Split("`n"); $qb = $baseQ.Split("`n")
+    $qaTokens = @('PCSX2-L01', 'PCSX2-C01', 'PCSX2-S01', 'PCSX2-S02', 'GUI-PCSX2-05', 'productPath', '$product =', 'productTokens', 'productErrors', 'productAst', 'productFunction', 'rootProof', 'engineGroupCall', 'legacyDetection', 'currentIni', 'currentInputSources', 'currentPad1', 'settingsReaders', 'scriptFile', 'scriptText', 'needle',
+        'unsupportedMode', 'unsupportedStatus', 'supportedList', 'groupFunction', 'statusAssigned', 'statusInRow', 'planFunction', 'engineResolvedOnly', 'planResolvedOnly', 'planFromGroup', '$message1 =', '$message2 =', 'uninstallerGui', 'guessedVersionWords', 'guessedHits', 'agreedWords', 'missingWords')
+    function Test-QaFollowLine2([string]$Line) { foreach ($tk in $qaTokens) { if ($Line.IndexOf($tk, [System.StringComparison]::Ordinal) -ge 0) { return $true } }; return $false }
+    $keepQb = @($qb | Where-Object { (-not (Test-QaFollowLine2 $_)) -and ($_.Trim() -ne '') -and ($_.Trim() -ne '}') })
+    $keepQa = @($qa | Where-Object { (-not (Test-QaFollowLine2 $_)) -and ($_.Trim() -ne '') -and ($_.Trim() -ne '}') })
+    $qLost = @($keepQb | Where-Object { $keepQa -cnotcontains $_ }); $qAdded = @($keepQa | Where-Object { $keepQb -cnotcontains $_ })
+    [void](Assert-I2A ('S6-unchanged-' + $relQa) (($qLost.Count -eq 0) -and ($qAdded.Count -eq 0) -and ($keepQa.Count -eq $keepQb.Count) -and ($keepQb.Count -gt 50)) ("QA1 lines outside the PCSX2 follow-up set: baseline lines lost $($qLost.Count), lines added $($qAdded.Count); $($keepQb.Count) vs $($keepQa.Count)"))
+}
 # I2-D: the two engine layers may differ from the I2-B commit only in ONE function each (the lock name / the lock DACL). Everything else - every other function and
 # all code outside the functions (comments excluded) - must be identical to the I2-B commit.
-foreach ($pair in @(@('installer/scripts/DenGoInstallerTransaction.ps1', 'DgLock-NewSecurity'), @('installer/scripts/DenGoInstallerProductApply.ps1', 'Get-DenGoLockName'))) {
+# The I2-A TOCTOU contract (F-D2 GREEN, approved 2026-10-31, core pinned by SHA in I2B-Static S9 and I3-Static S-12) changes exactly eleven functions of the core on top of the I2-D one (nine new or TOCTOU-only, plus DgTx-Begin and DgTx-ExecuteRecovery, which the I2-B commit already had changed for AllowEmptyTransaction and the report path).
+# The allowed set is an EXACT list of twelve; everything outside those twelve functions (every other function and all code outside the functions, comments excluded) must still be the I2-B commit's.
+$toctouCoreFns = @('DgConst-DisplacedSuffix', 'DgFs-Replace', 'DgG-Replace', 'DgTx-ApplyItem', 'DgTx-DisplacedInspect', 'DgTx-DisplacedPath', 'DgTx-ItemState', 'DgTx-NewAllowed', 'DgTx-Preflight', 'DgTx-Begin', 'DgTx-ExecuteRecovery')
+foreach ($pair in @(, @('installer/scripts/DenGoInstallerTransaction.ps1', (@(@('DgLock-NewSecurity') + $toctouCoreFns | Sort-Object) -join ',')))) {
     $rel = $pair[0]; $allowedFn = $pair[1]
     $base = Get-BaselineText $rel
     if ($null -eq $base) { [void](Assert-I2A ('S6-' + $rel) $true 'baseline unavailable; skipped'); continue }
@@ -132,10 +196,30 @@ foreach ($pair in @(@('installer/scripts/DenGoInstallerTransaction.ps1', 'DgLock
     $changedFns = @($fb.Keys | Where-Object { (-not $fa.ContainsKey($_)) -or ($fa[$_] -ne $fb[$_]) } | Sort-Object)
     $removedFns = @($fa.Keys | Where-Object { -not $fb.ContainsKey($_) })
     $restA = $base; $restB = $cur
-    if ($fa.ContainsKey($allowedFn) -and $fb.ContainsKey($allowedFn)) { $restA = $base.Replace($fa[$allowedFn], ''); $restB = $cur.Replace($fb[$allowedFn], '') }
+    foreach ($afn in $allowedFn.Split(',')) { if ($fa.ContainsKey($afn)) { $restA = $restA.Replace($fa[$afn], '') }; if ($fb.ContainsKey($afn)) { $restB = $restB.Replace($fb[$afn], '') } }
     $codeA = @($restA.Split("`n") | Where-Object { $_.Trim().Length -gt 0 -and -not $_.TrimStart().StartsWith('#') })
     $codeB = @($restB.Split("`n") | Where-Object { $_.Trim().Length -gt 0 -and -not $_.TrimStart().StartsWith('#') })
-    [void](Assert-I2A ('S6-i2d-single-function-change-' + $rel) ((($changedFns -join ',') -eq $allowedFn) -and ($removedFns.Count -eq 0) -and (($codeA -join "`n") -ceq ($codeB -join "`n"))) ("changed functions: $($changedFns -join ','); removed: $($removedFns -join ','); code outside the function identical (comments excluded): $((($codeA -join "`n") -ceq ($codeB -join "`n")))"))
+    [void](Assert-I2A ('S6-i2d-single-function-change-' + $rel) ((($changedFns -join ',') -ceq $allowedFn) -and ($removedFns.Count -eq 0) -and (($codeA -join "`n") -ceq ($codeB -join "`n"))) ("expected (I2-D 1 + TOCTOU 11): $allowedFn; changed functions: $($changedFns -join ','); removed: $($removedFns -join ','); code outside the function identical (comments excluded): $((($codeA -join "`n") -ceq ($codeB -join "`n")))"))
+}
+# I3-D follow-up of the I2-D single-function guard: the install product layer may differ from the I2-B commit only in a FIXED set of functions - Get-DenGoLockName (I2-D) and the I3 set
+# (8 changed, 17 new, 1 removed); every other function and all code outside those functions (comments excluded) must be identical.
+$relPa = 'installer/scripts/DenGoInstallerProductApply.ps1'
+$basePa = Get-BaselineText $relPa
+if ($null -eq $basePa) { [void](Assert-I2A ('S6-i2d-single-function-change-' + $relPa) $true 'baseline unavailable; skipped') }
+else {
+    $curPa = Get-CurrentText (Join-Path $repo $relPa.Replace('/', '\'))
+    $chg = Get-FunctionSetChange $basePa $curPa
+    $paChanged = @('Convert-DenGoPlanToEntries', 'DgP-MapPlatform', 'DgP-NewResult', 'DgP-PeMachine', 'DgP-SetOrder', 'Get-DenGoLockName', 'Get-DenGoRoleSpec', 'Invoke-DenGoProductInstall', 'Merge-DenGoInstalledState')
+    $paNew = @('DgP-IsNonOwningOwnership', 'DgP-IsPcsx2Record', 'DgP-NeedsPromotion', 'DgP-Pcsx2KnownOwnership', 'DgP-PreviousOriginOf', 'DgP-PromotionBlock', 'Get-DenGoClosedGenerationPcsx2Origins', 'Get-DenGoDocumentsRoot', 'Get-DenGoPcsx2Identity', 'Get-DenGoPcsx2KnownPairs', 'Group-DenGoPcsx2Candidates', 'New-DenGoPcsx2PlanItems',
+        'Resolve-DenGoPcsx2Root', 'Test-DenGoPcsx2ExeListed', 'Test-DenGoPcsx2KnownPair', 'Test-DenGoPcsx2PreviousOrigin', 'Test-DenGoPcsx2RootProof')
+    $paRemoved = @('DgP-IsDeferredRecord')
+    $fa3 = Get-FunctionTexts $basePa; $fb3 = Get-FunctionTexts $curPa
+    $restA = $basePa; foreach ($n in ($paChanged + $paRemoved)) { if ($fa3.ContainsKey($n)) { $restA = $restA.Replace($fa3[$n], '') } }
+    $restB = $curPa; foreach ($n in ($paChanged + $paNew)) { if ($fb3.ContainsKey($n)) { $restB = $restB.Replace($fb3[$n], '') } }
+    $codeA = @($restA.Split("`n") | Where-Object { $_.Trim().Length -gt 0 -and -not $_.TrimStart().StartsWith('#') })
+    $codeB = @($restB.Split("`n") | Where-Object { $_.Trim().Length -gt 0 -and -not $_.TrimStart().StartsWith('#') })
+    $outsideSame2 = (($codeA -join "`n") -ceq ($codeB -join "`n"))
+    [void](Assert-I2A ('S6-i2d-single-function-change-' + $relPa) ((($chg.Changed -join ',') -ceq (($paChanged | Sort-Object) -join ',')) -and (($chg.New -join ',') -ceq (($paNew | Sort-Object) -join ',')) -and (($chg.Removed -join ',') -ceq ($paRemoved -join ',')) -and $outsideSame2) ("changed: $($chg.Changed.Count) (expected $($paChanged.Count)); new: $($chg.New.Count) (expected $($paNew.Count)); removed: $($chg.Removed -join ','); code outside the listed functions identical (comments excluded): $outsideSame2; unexpected changed: [$(@($chg.Changed | Where-Object { $paChanged -cnotcontains $_ }) -join ',')]; unexpected new: [$(@($chg.New | Where-Object { $paNew -cnotcontains $_ }) -join ',')]"))
 }
 # I2-D: the setup-EXE builder may only ADD lines, except that the four post-step calls of the two main() functions move one level deeper (into the lock region)
 $baseBuild = Get-BaselineText 'installer/Build-DenGo-SetupExe-2.0.0.ps1'
@@ -156,14 +240,22 @@ else {
     $la = $baseGui.Split("`n"); $lb = $curGui.Split("`n")
     $removed = @($la | Where-Object { $lb -cnotcontains $_ })
     $added = @($lb | Where-Object { $la -cnotcontains $_ })
-    [void](Assert-I2A 'S7-gui-only-additions' ($removed.Count -eq 0) ("lines removed or changed: $($removed.Count)"))
-    [void](Assert-I2A 'S7-gui-additions-are-the-notice' (($added.Count -gt 0) -and (@($added | Where-Object { $_ -notmatch 'completeNotice|ResidualNotice|ResidualFileCount|ManualCheckRequired|ReportPath|\$show|\$count|\$manual|\$candidate|\$property|\$text|^\s*\}|^\s*try \{|catch|function Set-ResidualNotice|Visible|Text|param|completePage|Result\.PSObject|^#|^\s*$' }).Count -eq 0)) ("added lines: $($added.Count); lines that are not about the notice: " + (@($added | Where-Object { $_ -notmatch 'completeNotice|ResidualNotice|ResidualFileCount|ManualCheckRequired|ReportPath|\$show|\$count|\$manual|\$candidate|\$property|\$text|^\s*\}|^\s*try \{|catch|function Set-ResidualNotice|Visible|Text|param|completePage|Result\.PSObject|^#|^\s*$' }).Count)))
+    # I3-D follow-up: the ONLY baseline lines that may go are the two exact-name PCSX2 process rules of Get-RunningProductNames (DE-I3-8); they are replaced by one rule that stops every pcsx2*.exe
+    $oldQtRule = "        [string]::Equals([string]`$_.Name,'pcsx2-qt.exe',[System.StringComparison]::OrdinalIgnoreCase) -or"
+    $oldClassicRule = "        [string]::Equals([string]`$_.Name,'pcsx2.exe',[System.StringComparison]::OrdinalIgnoreCase)"
+    $newPcsx2Rule = "        ([string]`$_.Name -match '(?i)\Apcsx2[^\\/]*[.]exe\z')"
+    [void](Assert-I2A 'S7-gui-only-additions' (($removed.Count -eq 2) -and ($removed[0] -ceq $oldQtRule) -and ($removed[1] -ceq $oldClassicRule)) ("lines removed or changed: $($removed.Count) (allowed: exactly the two exact-name PCSX2 process rules)"))
+    [void](Assert-I2A 'S7-gui-additions-are-the-notice' (($added.Count -gt 0) -and (@($added | Where-Object { ($_ -cne $newPcsx2Rule) -and ($_ -notmatch 'completeNotice|ResidualNotice|ResidualFileCount|ManualCheckRequired|ReportPath|\$show|\$count|\$manual|\$candidate|\$property|\$text|^\s*\}|^\s*try \{|catch|function Set-ResidualNotice|Visible|Text|param|completePage|Result\.PSObject|^#|^\s*$') }).Count -eq 0)) ("added lines: $($added.Count); lines that are neither the notice nor the one new PCSX2 process rule: " + (@($added | Where-Object { ($_ -cne $newPcsx2Rule) -and ($_ -notmatch 'completeNotice|ResidualNotice|ResidualFileCount|ManualCheckRequired|ReportPath|\$show|\$count|\$manual|\$candidate|\$property|\$text|^\s*\}|^\s*try \{|catch|function Set-ResidualNotice|Visible|Text|param|completePage|Result\.PSObject|^#|^\s*$') }).Count)))
     $fa = Get-FunctionTexts $baseGui; $fb = Get-FunctionTexts $curGui
-    $guarded = @('Test-UninstallCommitted', 'Write-RunResult', 'Complete-Run', 'Set-RunFailed', 'Set-RunCompleted', 'Set-RunCancelled', 'Invoke-UnhandledGuiException', 'Show-GuiError', 'Confirm-Cancel', 'Confirm-RunningProductsClosed', 'Join-NativeArguments', 'Get-RunningProductNames', 'Set-Page')
+    $guarded = @('Test-UninstallCommitted', 'Write-RunResult', 'Complete-Run', 'Set-RunFailed', 'Set-RunCompleted', 'Set-RunCancelled', 'Invoke-UnhandledGuiException', 'Show-GuiError', 'Confirm-Cancel', 'Confirm-RunningProductsClosed', 'Join-NativeArguments', 'Set-Page')
     $guardedBad = @($guarded | Where-Object { $fa[$_] -ne $fb[$_] })
-    [void](Assert-I2A 'S7-i1-functions-untouched' ($guardedBad.Count -eq 0) ('changed I1 functions: ' + ($guardedBad -join ',')))
+    # Get-RunningProductNames may differ from the baseline in exactly one way: the two exact-name PCSX2 rules became the one pcsx2*.exe rule
+    $expectedRunning = $fa['Get-RunningProductNames'].Replace($oldQtRule + "`n" + $oldClassicRule, $newPcsx2Rule)
+    if ($fb['Get-RunningProductNames'] -cne $expectedRunning) { $guardedBad += 'Get-RunningProductNames' }
+    [void](Assert-I2A 'S7-i1-functions-untouched' (($guardedBad.Count -eq 0) -and ($expectedRunning -cne $fa['Get-RunningProductNames'])) ('changed I1 functions: ' + ($guardedBad -join ',')))
     $newFns = @($fb.Keys | Where-Object { -not $fa.ContainsKey($_) })
-    [void](Assert-I2A 'S7-one-new-function' (($newFns.Count -eq 1) -and ($newFns[0] -eq 'Set-ResidualNotice') -and (@($fb.Keys | Where-Object { $fa.ContainsKey($_) -and $fa[$_] -ne $fb[$_] }).Count -eq 0)) ('new functions: ' + ($newFns -join ',')))
+    $changedFnsGui = @($fb.Keys | Where-Object { $fa.ContainsKey($_) -and $fa[$_] -ne $fb[$_] })
+    [void](Assert-I2A 'S7-one-new-function' (($newFns.Count -eq 1) -and ($newFns[0] -eq 'Set-ResidualNotice') -and ($changedFnsGui.Count -eq 1) -and ($changedFnsGui[0] -ceq 'Get-RunningProductNames')) ('new functions: ' + ($newFns -join ',') + '; changed functions: ' + ($changedFnsGui -join ',')))
     $closing = [regex]::Match($baseGui, '\$form\.Add_FormClosing\(\{[\s\S]*?\n\}\)').Value
     [void](Assert-I2A 'S7-formclosing-untouched' (($closing.Length -gt 100) -and ($curGui.IndexOf($closing, [System.StringComparison]::Ordinal) -ge 0)) 'the FormClosing handler is byte-identical')
     $startClick = [regex]::Match($baseGui, '\$startButton\.Add_Click\(\{[\s\S]*?\n\}\)').Value

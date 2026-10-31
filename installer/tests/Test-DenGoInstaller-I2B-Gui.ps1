@@ -93,7 +93,9 @@ Add-I1Result 'GUI-DEFERRED-05-text-fits-the-cell' ($width -le 258) ("measured wi
 
 # ---------------------------------------------------------------- controls: the old rows are unchanged
 $o = Run-Scenario 'ok'
-Add-I1Result 'GUI-DEFERRED-06-control-applied-still-ok-row' ($o.Reached -and ($o.Texts -contains $okText) -and (-not ($o.Texts -contains $deferredText)) -and ($o.ExitCode -eq 0)) 'an applied PCSX2 still reads "set up / usable"'
+# I3-D follow-up (owner decision DE-I3-5): an applied PCSX2 1.6.0 now reads "PCSX2 1.6.0 supported"; the retired "set up / usable" must no longer be the PCSX2 row
+$supportedText = 'PCSX2 1.6.0' + (U 0x5BFE, 0x5FDC)
+Add-I1Result 'GUI-DEFERRED-06-control-applied-still-ok-row' ($o.Reached -and ($o.Texts -contains $supportedText) -and (-not ($o.Texts -contains $okText)) -and (-not ($o.Texts -contains $deferredText)) -and ($o.ExitCode -eq 0)) 'an applied PCSX2 reads the agreed Supported wording (PCSX2 1.6.0 supported), not the retired "set up / usable"'
 $f = Run-Scenario 'fail'
 Add-I1Result 'GUI-DEFERRED-07-control-missing-result-still-fail-row' ($f.Reached -and ($f.Texts -contains $failText) -and (-not ($f.Texts -contains $deferredText))) ("reached=$($f.Reached) texts: " + ($f.Texts -join ' / '))
 $k = Run-Scenario 'keep'

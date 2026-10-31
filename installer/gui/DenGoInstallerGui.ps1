@@ -199,11 +199,17 @@ function Has-DetectedBveWithoutBveEX {
     }).Count -gt 0
     return $hasBve -and -not [bool]$script:plan.BveExCurrentInstalled
 }
+function Test-Pcsx2Status([string]$Status) {
+    return @($script:plan.Detected | Where-Object {
+        [string]::Equals([string]$_.Platform,'PCSX2',[System.StringComparison]::Ordinal) -and
+        [string]::Equals([string]($_ | Select-Object -ExpandProperty SupportStatus -ErrorAction SilentlyContinue),$Status,[System.StringComparison]::Ordinal)
+    }).Count -gt 0
+}
 function Has-UnsupportedCurrentPCSX2 {
     return @($script:plan.Detected | Where-Object {
         [string]::Equals([string]$_.Platform,'PCSX2',[System.StringComparison]::Ordinal) -and
         [string]::Equals([string]$_.State,'Detected',[System.StringComparison]::Ordinal) -and
-        ([string]$_.Mode).IndexOf('CurrentIntegrated',[System.StringComparison]::Ordinal) -ge 0
+        (([string]$_.Mode).IndexOf('CurrentIntegrated',[System.StringComparison]::Ordinal) -ge 0 -or [string]::Equals([string]($_ | Select-Object -ExpandProperty SupportStatus -ErrorAction SilentlyContinue),'UnsupportedCurrent',[System.StringComparison]::Ordinal))
     }).Count -gt 0
 }
 function Show-DependencyWarningDialog {
@@ -254,7 +260,7 @@ function Show-DependencyWarningDialog {
     try{[void]$dialog.ShowDialog($form)}finally{$mainLabel.Font.Dispose();$contentLabel.Font.Dispose();$dialog.Dispose()}
 }
 function Show-UnsupportedPCSX2Dialog {
-    Show-DependencyWarningDialog '検出したPCSX2には対応していません' "PCSX2 ver1.7以降の新しい入力設定方式が検出されました`r`n正式対応しているPCSX2はver1.6.0です" 'https://forums.pcsx2.net/Thread-PCSX2-1-6-0-Standalone-Installer'
+    Show-DependencyWarningDialog '検出したPCSX2には対応していません' "検出したPCSX2は非対応`r`nPCSX2 1.6.0対応" 'https://forums.pcsx2.net/Thread-PCSX2-1-6-0-Standalone-Installer'
 }
 function Show-MissingBveEXDialog {
     Show-DependencyWarningDialog 'BveEXが見つかりません' "BveEXを導入してからセットアップを再実行するか、設定をスキップしてください" 'https://bveex.okaoka-depot.com/download'
@@ -267,7 +273,7 @@ function Show-Results {
     for($i=$table.Controls.Count-1;$i-ge 3;$i--){$table.Controls.RemoveAt($i)}
     $core=Get-ApplyResult 'Core' 'Application';if(@($core).Count-eq1){if(Has-Detected 'Steam' 'JRETS'){Add-Row 1 'ok' 'JRETS' '利用可能'}else{Add-Row 1 'none' 'JRETS' '見つかりませんでした'};if(Has-Detected 'Steam' 'RUNNINGTRAIN'){Add-Row 2 'ok' 'RUNNING TRAIN' '利用可能'}else{Add-Row 2 'none' 'RUNNING TRAIN' '見つかりませんでした'}}else{Add-Row 1 'fail' 'JRETS' '本体の導入に失敗しました';Add-Row 2 'fail' 'RUNNING TRAIN' '本体の導入に失敗しました'}
     foreach($entry in @(@('BVE5',3,'BVE Trainsim 5'),@('BVE6',4,'BVE Trainsim 6'))){$p=$entry[0];$r=[int]$entry[1];$n=$entry[2];$a=Get-ApplyResult $p 'Caller';if([bool]$script:bveIntegrationSkipped-and(Has-Detected 'BVE' $p)){Add-Row $r 'warn' $n '設定をスキップしました'}elseif(@($a).Count-eq1){Add-Row $r 'ok' $n '連携済み・利用可能'}elseif(Has-Detected 'BVE' $p){Add-Row $r 'fail' $n '連携機能の導入に失敗しました'}else{Add-Row $r 'none' $n '見つかりませんでした'}}
-    $pcsx2Apply=Get-ApplyResult 'PCSX2' 'InputProfile';if(-not(Has-Detected 'PCSX2' '')){Add-Row 5 'none' 'PCSX2' '見つかりませんでした'}elseif(Test-ApplyDeferred $pcsx2Apply){Add-Row 5 'warn' 'PCSX2' 'PCSX2の入力設定は今回は変更していません'}elseif(Has-UnsupportedCurrentPCSX2 -and @($pcsx2Apply).Count-eq0){Add-Row 5 'warn' 'PCSX2' 'ver1.7以降・非対応'}elseif(@($pcsx2Apply|Where-Object{$_.Action-eq'PreserveUserModified'}).Count-eq1){Add-Row 5 'warn' 'PCSX2' '既存の設定を使用します'}elseif(@($pcsx2Apply).Count-eq1){Add-Row 5 'ok' 'PCSX2' '設定済み・利用可能'}else{Add-Row 5 'fail' 'PCSX2' '入力設定の追加に失敗しました'}
+    $pcsx2Apply=Get-ApplyResult 'PCSX2' 'InputProfile';$pcsx2All=@(Get-ApplyResult 'PCSX2' '');if(-not(Has-Detected 'PCSX2' '')){Add-Row 5 'none' 'PCSX2' '見つかりませんでした'}elseif(Test-ApplyDeferred $pcsx2Apply){Add-Row 5 'warn' 'PCSX2' 'PCSX2の入力設定は今回は変更していません'}elseif((Test-Pcsx2Status 'Ambiguous')-and$pcsx2All.Count-eq0){Add-Row 5 'warn' 'PCSX2' '複数候補のため選択できない'}elseif((Test-Pcsx2Status 'UnsupportedUnverified')-and$pcsx2All.Count-eq0){Add-Row 5 'warn' 'PCSX2' '版を確認できないため非対応'}elseif(((Test-Pcsx2Status 'UnsupportedCurrent')-or(Has-UnsupportedCurrentPCSX2))-and$pcsx2All.Count-eq0){Add-Row 5 'warn' 'PCSX2' '検出したPCSX2は非対応'}elseif(@($pcsx2All|Where-Object{$_.Action-eq'PreserveOriginInvalid'}).Count-ge1){Add-Row 5 'warn' 'PCSX2' '確認が必要なため変更しません'}elseif(@($pcsx2All|Where-Object{$_.Action-eq'PreserveUserModified'}).Count-ge1){Add-Row 5 'warn' 'PCSX2' '既存の設定を使用します'}elseif(@($pcsx2Apply).Count-eq1){Add-Row 5 'ok' 'PCSX2' 'PCSX2 1.6.0対応'}else{Add-Row 5 'fail' 'PCSX2' '入力設定の追加に失敗しました'}
     $rpcs3Apply=Get-ApplyResult 'RPCS3' 'InputProfile';if(-not(Has-Detected 'RPCS3' '')){Add-Row 6 'none' 'RPCS3' '見つかりませんでした'}elseif(@($rpcs3Apply|Where-Object{$_.Action-eq'PreserveUserModified'}).Count-eq1){Add-Row 6 'warn' 'RPCS3' '既存の設定を使用します'}elseif(@($rpcs3Apply).Count-eq1){Add-Row 6 'ok' 'RPCS3' '設定済み・利用可能'}else{Add-Row 6 'fail' 'RPCS3' '入力設定の追加に失敗しました'}
     Set-Page 'result'
 }
@@ -369,8 +375,7 @@ function Get-RunningProductNames {
         [string]::Equals([string]$_.Name,'BveTs.exe',[System.StringComparison]::OrdinalIgnoreCase) -or
         [string]::Equals([string]$_.Name,'rpcs3.exe',[System.StringComparison]::OrdinalIgnoreCase) -or
         [string]::Equals([string]$_.Name,'DenGoControllerConverter.exe',[System.StringComparison]::OrdinalIgnoreCase) -or
-        [string]::Equals([string]$_.Name,'pcsx2-qt.exe',[System.StringComparison]::OrdinalIgnoreCase) -or
-        [string]::Equals([string]$_.Name,'pcsx2.exe',[System.StringComparison]::OrdinalIgnoreCase)
+        ([string]$_.Name -match '(?i)\Apcsx2[^\\/]*[.]exe\z')
     })
     $products = New-Object System.Collections.ArrayList
     foreach ($process in $running) {

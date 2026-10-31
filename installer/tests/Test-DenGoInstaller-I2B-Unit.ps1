@@ -126,7 +126,11 @@ try {
     Denied  'U1-form-empty' (Gate 'App' '' '' 'Dest') 'empty' 'PathEmpty'
     Denied  'U1-kind-unknown' (Gate 'App' '' $P.AppExe 'Whatever') 'unknown kind' 'KindUnknown'
     Denied  'U1-role-unknown' (Gate 'Deferred' '' $P.AppExe 'Dest') 'the Deferred pseudo role' 'RoleUnknown'
-    Denied  'U1-role-pcsx2' (Gate 'Pcsx2' '' (Join-Path $L.Pcsx2Inis 'LilyPad.ini') 'Dest') 'PCSX2 / LilyPad is never allowed' 'RoleUnknown'
+    # I3-D follow-up: Pcsx2 is a real role since I3 - two FIXED leaves below an existing inis folder. A call without a root is still refused (RootInvalid), and no other file of the PCSX2 tree is allowed.
+    Denied  'U1-role-pcsx2' (Gate 'Pcsx2' '' (Join-Path $L.Pcsx2Inis 'LilyPad.ini') 'Dest') 'the PCSX2 role without a root is refused' 'RootInvalid'
+    Allowed 'U1-role-pcsx2-lilypad-ini' (Gate 'Pcsx2' $L.Pcsx2Inis (Join-Path $L.Pcsx2Inis 'LilyPad.ini') 'Dest') 'the fixed leaf LilyPad.ini below the inis root'
+    Allowed 'U1-role-pcsx2-lily' (Gate 'Pcsx2' $L.Pcsx2Inis (Join-Path $L.Pcsx2Inis 'DenGo-Controller-Converter.lily') 'Dest') 'the fixed leaf DenGo-Controller-Converter.lily below the inis root'
+    Denied  'U1-role-pcsx2-other-ini' (Gate 'Pcsx2' $L.Pcsx2Inis (Join-Path $L.Pcsx2Inis 'PCSX2.ini') 'Dest') 'PCSX2.ini is never a leaf' 'LeafNotAllowed'
     # the item-level gate: every fact of one registered item
     $good = Test-DenGoItemGate $P 'Core|Application|App|' $P.AppExe ($P.AppExe + '.dengo.tmp') ([string[]]@($P.ProgramsDir, $P.AppDir)) '' $tx
     [void](Assert-I2A 'U1-itemgate-ok' ($good.Count -eq 0) ('failures=' + $good.Count))
@@ -181,9 +185,13 @@ try {
     $entries = Convert-DenGoPlanToEntries $P $plan $stageNone
     $txi = Get-DenGoTxItems $entries
     $order = @($txi.Ordered | ForEach-Object { $_.Platform })
-    [void](Assert-I2A 'U4-set-order' (($order -join ',') -eq 'Core,Core,BVE5,BVE6,BveEX Current,BveEX Current,AtsEX Legacy,AtsEX Legacy,RPCS3') ('order=' + ($order -join ',')))
-    [void](Assert-I2A 'U4-pcsx2-not-in-transaction' (@($txi.Items | Where-Object { $_.Tag.StartsWith('PCSX2') }).Count -eq 0) 'no PCSX2 item')
-    [void](Assert-I2A 'U4-pcsx2-deferred-entries' (@($entries | Where-Object { $_.Deferred }).Count -eq 2) 'two Deferred entries')
+    # I3-D follow-up: PCSX2 is the Set after RPCS3 (and before the shortcut), and it is a transaction item - exactly the two fixed leaves, nothing else, no Deferred entry
+    [void](Assert-I2A 'U4-set-order' (($order -join ',') -eq 'Core,Core,BVE5,BVE6,BveEX Current,BveEX Current,AtsEX Legacy,AtsEX Legacy,RPCS3,PCSX2,PCSX2') ('order=' + ($order -join ',')))
+    $pcsx2Items = @($txi.Items | Where-Object { $_.Tag.StartsWith('PCSX2') })
+    $pcsx2ExpectedTags = @(('PCSX2|InputProfile|Pcsx2|' + (DgP-Full $L.Pcsx2Inis)), ('PCSX2|EffectiveInputProfile|Pcsx2|' + (DgP-Full $L.Pcsx2Inis))) | Sort-Object
+    $pcsx2ExpectedDests = @((DgP-Full (Join-Path $L.Pcsx2Inis 'DenGo-Controller-Converter.lily')), (DgP-Full (Join-Path $L.Pcsx2Inis 'LilyPad.ini'))) | Sort-Object
+    [void](Assert-I2A 'U4-pcsx2-not-in-transaction' (($pcsx2Items.Count -eq 2) -and ((@($pcsx2Items | ForEach-Object { $_.Tag } | Sort-Object) -join '|') -ceq ($pcsx2ExpectedTags -join '|')) -and ((@($pcsx2Items | ForEach-Object { DgP-Full ([string]$_.Destination) } | Sort-Object) -join '|') -ceq ($pcsx2ExpectedDests -join '|'))) ('PCSX2 items: ' + $pcsx2Items.Count + ' - exactly the two fixed leaves, tagged with the Pcsx2 role and the inis root'))
+    [void](Assert-I2A 'U4-pcsx2-deferred-entries' (@($entries | Where-Object { $_.Deferred }).Count -eq 0) 'no Deferred entry: PCSX2 is not deferred any more')
     $swapped = @($plan[2], $plan[0], $plan[1], $plan[3]) + @($plan[4..($plan.Count - 1)])   # BVE5 first, then Core
     $e2 = Convert-DenGoPlanToEntries $P ([object[]]$swapped) $null
     $o2 = @((Get-DenGoTxItems $e2).Ordered | ForEach-Object { $_.Platform })
@@ -191,7 +199,15 @@ try {
     $p3 = New-I2BScenario 'u4' 'P3'
     try { $unchangedPlan = Get-I2BPlan $p3 'P3' } finally { Remove-I2ASandbox $p3.Root }
     $e3 = Convert-DenGoPlanToEntries $P ([object[]]$unchangedPlan) $null
-    [void](Assert-I2A 'U4-unchanged-not-tx' (@($e3 | Where-Object { $_.IsTx }).Count -eq 0) 'Unchanged, PreserveUserModified, NotInitialized never become items')
+    # I3-D follow-up: in P3 the two PCSX2 files differ from the sources, so they ARE written (UpdateOrRepair); every other Unchanged / PreserveUserModified / NotInitialized item is still no item.
+    # For PCSX2 the no-write actions are checked on their own below, with the new PreserveOriginInvalid included.
+    $e3Pcsx2 = @($e3 | Where-Object { $_.Platform -eq 'PCSX2' })
+    [void](Assert-I2A 'U4-unchanged-not-tx' ((@($e3 | Where-Object { $_.IsTx -and ($_.Platform -ne 'PCSX2') }).Count -eq 0) -and ($e3Pcsx2.Count -eq 2) -and (@($e3Pcsx2 | Where-Object { $_.IsTx }).Count -eq 2)) 'Unchanged, PreserveUserModified, NotInitialized never become items (PCSX2 UpdateOrRepair does)')
+    foreach ($act in 'Unchanged', 'PreserveUserModified', 'NotInitialized', 'PreserveOriginInvalid') {
+        $variant = @($plan | Where-Object { $_.Platform -eq 'PCSX2' } | ForEach-Object { $c = $_.PSObject.Copy(); $c.Action = $act; $c })
+        $ev = Convert-DenGoPlanToEntries $P ([object[]]$variant) $null
+        [void](Assert-I2A ('U4-pcsx2-' + $act.ToLowerInvariant() + '-is-no-item') (($variant.Count -eq 2) -and (@($ev | Where-Object { $_.IsTx }).Count -eq 0) -and (@($ev).Count -eq 2) -and (@((Get-DenGoTxItems $ev).Items).Count -eq 0)) "a PCSX2 item whose Action is $act is kept for the state but never becomes a transaction item")
+    }
     $thr = ''; try { [void](Convert-DenGoPlanToEntries $P ([object[]]@([pscustomobject]@{ Platform = 'Unknown'; Component = 'x'; Action = 'Add'; Source = 's'; SourceSHA256 = ''; Destination = 'C:\x'; DestinationSHA256 = '' })) $null) } catch { $thr = DgError-Code $_.Exception }
     [void](Assert-I2A 'U4-unknown-platform' ($thr -eq 'PlanInvalid') "code=$thr")
     $thr = ''; try { [void](Convert-DenGoPlanToEntries $P ([object[]]@([pscustomobject]@{ Platform = 'Core'; Component = 'x'; Action = 'Delete'; Source = 's'; SourceSHA256 = ''; Destination = 'C:\x'; DestinationSHA256 = '' })) $null) } catch { $thr = DgError-Code $_.Exception }
@@ -279,20 +295,22 @@ try {
     $pv2 = Prev @() @{ ClosedRecords = [object[]]@([pscustomobject]@{ Record = [pscustomobject]@{ Destination = 'C:\old' }; Reason = 'earlier' }) }
     $s = Merge $pv2 @((E 'Core' 'Application' 'Add' $d1))
     [void](Assert-I2A 'U5-closed-history-kept' ((@($s.ClosedRecords).Count -eq 1) -and ($s.ClosedRecords[0].Reason -eq 'earlier')) 'earlier ClosedRecords survive')
-    # deferred (PCSX2)
+    # PCSX2 (I3-D follow-up: PCSX2 is not deferred any more - no Deferred entry and no DeferredThisRun presence exist. The I2-B contract survives in its I3 form: a PCSX2 record that the plan no longer
+    # contains is carried verbatim - Origin and Backups[] included - and is never closed; a written PCSX2 item without an earlier record is an ordinary record.)
     $pv = Prev @((Rec 'PCSX2' 'EffectiveInputProfile' $d3 'ReplacedExisting' 'S3' 'ORIG' 'C:\old\lily.bak' $true))
-    $s = Merge $pv @((E 'PCSX2' 'EffectiveInputProfile' 'UpdateOrRepair' $d3 $false $true), (E 'Core' 'Application' 'Add' $d1))
+    $s = Merge $pv @((E 'Core' 'Application' 'Add' $d1))
     $r = RecOf $s $d3
-    [void](Assert-I2A 'U5-deferred-previous-carried' (($r.Presence -eq 'DeferredThisRun') -and ($r.Ownership -eq 'ReplacedExisting') -and ($r.Backup -eq 'C:\old\lily.bak') -and ($r.BeforeSHA256 -eq 'ORIG')) 'a PCSX2 record is carried unchanged while PCSX2 is deferred')
-    $s = Merge $null @((E 'PCSX2' 'InputProfile' 'Add' $d4 $false $true))
-    [void](Assert-I2A 'U5-deferred-no-previous-no-record' ($null -eq (RecOf $s $d4)) 'a deferred item without an earlier record creates no record')
-    # F4: ClosedRecords only for records that are outside the plan, own nothing, are gone, and are not deferred (I3) records
+    [void](Assert-I2A 'U5-deferred-previous-carried' (($r.Presence -eq 'NotDetectedThisRun') -and ($r.Ownership -eq 'ReplacedExisting') -and ($r.Backup -eq 'C:\old\lily.bak') -and ($r.BeforeSHA256 -eq 'ORIG') -and ($r.ExistedBefore -eq $true) -and (@($s.ClosedRecords).Count -eq 0)) 'a PCSX2 record outside the plan is carried with its Origin unchanged (NotDetectedThisRun) and is never closed')
+    $s = Merge $null @((E 'PCSX2' 'InputProfile' 'Add' $d4))
+    $r = RecOf $s $d4
+    [void](Assert-I2A 'U5-deferred-no-previous-no-record' (($null -ne $r) -and ($r.Ownership -eq 'CreatedByInstaller') -and ($r.Presence -eq 'InPlan') -and ($r.ExistedBefore -eq $false) -and ($r.Backup -eq '') -and (@($r.Backups).Count -eq 0) -and (@($s.ClosedRecords).Count -eq 0)) 'a written PCSX2 item without an earlier record is an ordinary record: created by the installer, no Origin, no backup')
+    # F4: ClosedRecords only for records that are outside the plan, own nothing, are gone, and are not PCSX2 (I3) records
     $disk.Remove($d4.ToUpperInvariant())
     foreach ($own in 'NotInstalled', 'NotManaged', 'PreservedUserFile') {
         $pv = Prev @((Rec 'PCSX2' 'InputProfile' $d4 $own ''))
-        $s = Merge $pv @((E 'PCSX2' 'InputProfile' 'UpdateOrRepair' $d4 $false $true), (E 'Core' 'Application' 'Add' $d1))
+        $s = Merge $pv @((E 'PCSX2' 'InputProfile' 'NotInitialized' $d4 $false), (E 'Core' 'Application' 'Add' $d1))
         $r = RecOf $s $d4
-        [void](Assert-I2A ("U5-f4-deferred-in-plan-missing-$own-is-kept") (($null -ne $r) -and ($r.Presence -eq 'DeferredThisRun') -and ($r.Observed -eq 'Missing') -and ($r.Ownership -eq $own) -and (@($s.ClosedRecords).Count -eq 0)) "in the plan as Deferred and missing: kept in Files, not closed (ownership $own)")
+        [void](Assert-I2A ("U5-f4-deferred-in-plan-missing-$own-is-kept") (($null -ne $r) -and ($r.Presence -eq 'InPlan') -and ($r.Observed -eq 'Missing') -and ($r.Ownership -eq $own) -and (@($s.ClosedRecords).Count -eq 0)) "in the plan as NotInitialized and missing: kept in Files, not closed (ownership $own)")
         $s = Merge $pv @((E 'Core' 'Application' 'Add' $d1))
         $r = RecOf $s $d4
         [void](Assert-I2A ("U5-f4-pcsx2-not-in-plan-missing-$own-is-kept") (($null -ne $r) -and ($r.Presence -eq 'NotDetectedThisRun') -and (@($s.ClosedRecords).Count -eq 0)) "a PCSX2 record that I3 takes over is never closed, even outside this plan (ownership $own)")

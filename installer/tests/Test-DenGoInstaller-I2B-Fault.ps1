@@ -51,6 +51,16 @@ function ReasonCodes($R) {
     return $codes
 }
 function Test-Clean($C, [bool]$Stage = $false) { return ((Cnt (Test-I2BLeftovers $C.L $Stage)) -eq 0) }
+# Items of an uninstaller dry run that stop it, except the platforms whose fixed C:\Users\Public roots the sandbox cannot satisfy (as before) and - I3-D follow-up - one harness artefact:
+# this suite writes transaction ids of the fault harness (T0001 ...), which the PRODUCTION uninstaller (a child process) does not accept as a backup folder, so the PCSX2 LilyPad.ini
+# (restored from its Origin by default since I3) reports ReplacedExistingBackupInvalid. Only that exact case, and only for a harness-id backup folder, is let through.
+function Get-UnsafeDryRunItems($L, $Items) {
+    $st = Get-I2BStateObject $L
+    $rec = $null; if ($null -ne $st) { $rec = @($st.Files | Where-Object { $_.Platform -eq 'PCSX2' -and $_.Component -eq 'EffectiveInputProfile' }) | Select-Object -First 1 }
+    # (the other artefact: the hand-written earlier state of P2 / P3 names an Origin below OldBackups\, which is no backup folder of the product at all)
+    $harnessOrigin = ($null -ne $rec) -and (([string]$rec.Backup -match '\\T\d{4}\\[^\\]+$') -or ([string]$rec.Backup -match '\\OldBackups\\[^\\]+$'))
+    return @($Items | Where-Object { $_.Action -eq 'UnsafeOrUnknown' -and $_.Platform -notin @('BveEX Current', 'AtsEX Legacy') -and -not ($harnessOrigin -and $_.Platform -eq 'PCSX2' -and $_.Component -eq 'EffectiveInputProfile' -and $_.ReasonCode -eq 'ReplacedExistingBackupInvalid') })
+}
 
 # ---------------------------------------------------------------- independent oracle for the post state
 function Get-LnkFacts([string]$Path) {
@@ -61,11 +71,13 @@ function Get-LnkFacts([string]$Path) {
 function Get-ExpectedLnkFacts($C) { return ($C.L.Product.AppExe + '|' + $C.L.Product.AppDir + '|' + $C.L.Product.AppIco + ',0') }function Test-PostOracle($C, $Pre, $Post, [bool]$WithShortcut) {
     # What a correct install does, from the plan and the sources only: written files carry the source bytes, everything else is unchanged.
     $problems = New-Object System.Collections.ArrayList
-    $expectAdd = @{}; $expectChange = @{ 'x:state' = $true }
+    $expectAdd = @{}; $expectChange = @{ 'x:state' = $true }; $txRel = @{}
     foreach ($p in $C.Plan) {
         $rel = 'f:' + (Rel $C $p.Destination)
-        $isTx = (($p.Platform -ne 'PCSX2') -and ($p.Action -in @('Add', 'UpdateOrRepair')))
+        # I3-D follow-up: PCSX2 is a Set like the others - its two fixed leaves are written when the plan says Add / UpdateOrRepair (they used to be excluded here because PCSX2 was Deferred)
+        $isTx = ($p.Action -in @('Add', 'UpdateOrRepair'))
         if ($isTx) {
+            $txRel[$rel] = $true
             if ($p.Action -eq 'Add') { $expectAdd[$rel] = $p.SourceSHA256 } else { $expectChange[$rel] = $p.SourceSHA256 }
             if (-not ($Post.ContainsKey($rel) -and ($Post[$rel] -eq (Get-I2AFileSha $p.Source)))) { [void]$problems.Add('written file has wrong content: ' + $rel) }
         }
@@ -84,9 +96,9 @@ function Get-ExpectedLnkFacts($C) { return ($C.L.Product.AppExe + '|' + $C.L.Pro
         elseif ($kind -eq '~') { if (-not $expectChange.ContainsKey($key)) { [void]$problems.Add('unexpected change: ' + $key) } }
     }
     foreach ($k in $expectAdd.Keys) { if (-not $Post.ContainsKey($k)) { [void]$problems.Add('expected new file missing: ' + $k) } }
-    # PCSX2 / LilyPad: byte-identical to the pre state
-    foreach ($k in @($Pre.Keys)) { if ($k -like 'f:pcsx2\*') { if (-not ($Post.ContainsKey($k) -and ($Post[$k] -eq $Pre[$k]))) { [void]$problems.Add('PCSX2 file changed: ' + $k) } } }
-    foreach ($k in @($Post.Keys)) { if ($k -like 'f:pcsx2\*') { if (-not $Pre.ContainsKey($k)) { [void]$problems.Add('PCSX2 file created: ' + $k) } } }
+    # PCSX2 / LilyPad: every file under the PCSX2 tree except the two fixed leaves the plan writes (checked above, with the source bytes) is byte-identical to the pre state and nothing else is created
+    foreach ($k in @($Pre.Keys)) { if (($k -like 'f:pcsx2\*') -and (-not $txRel.ContainsKey($k))) { if (-not ($Post.ContainsKey($k) -and ($Post[$k] -eq $Pre[$k]))) { [void]$problems.Add('PCSX2 file changed: ' + $k) } } }
+    foreach ($k in @($Post.Keys)) { if (($k -like 'f:pcsx2\*') -and (-not $txRel.ContainsKey($k))) { if (-not $Pre.ContainsKey($k)) { [void]$problems.Add('PCSX2 file created: ' + $k) } } }
     return , @($problems)
 }
 
@@ -105,8 +117,12 @@ foreach ($sc in $Scenarios) {
     $hist = @(Get-I2BHistoryJournals $C.L)
     $reg = @(); if ($hist.Count -eq 1) { $reg = @((DgJournal-Parse $hist[0]).Records | Where-Object { $_.stage -eq 'Register' } | ForEach-Object { [string]$_.path }) }
     [void](Assert-I2A ("A-$sc-journal-history") (($hist.Count -eq 1) -and ($hist[0] -like '*.committed.jsonl') -and ((Cnt (Get-I2BActiveTxnDirs $C.L)) -eq 0 -or ((@(Get-I2BActiveTxnDirs $C.L)).Count -ge 0))) ("history journals=$($hist.Count)"))
-    [void](Assert-I2A ("A-$sc-pcsx2-never-registered") (@($reg | Where-Object { $_ -like '*Pcsx2*' -or $_ -like '*LilyPad*' }).Count -eq 0) ("registered paths: $($reg.Count), none under PCSX2 / LilyPad"))
-    [void](Assert-I2A ("A-$sc-only-fixed-leaves-registered") (@($reg | Where-Object { (-not ($_ -like '*DenGoControllerConverter.exe')) -and (-not ($_ -like '*DenGo-Controller-Converter.ico')) -and (-not ($_ -like '*DenGoControllerConverter.dll')) -and (-not ($_ -like '*DenGoVehicleSpec.BveEx.Bridge.dll')) -and (-not ($_ -like '*DenGoBveVehicleSpec.dll')) -and (-not ($_ -like '*DenGoVehicleSpec.AtsExLegacy.Bridge.dll')) -and (-not ($_ -like '*DenGoAtsExLegacyVehicleSpec.dll')) -and (-not ($_ -like '*Den-Go-Controller.yml')) -and (-not ($_ -like '*DenGo Controller Converter.lnk')) }).Count -eq 0) ("every registered path is one of the fixed leaves"))
+    # I3-D follow-up: the journal registers exactly the PCSX2 leaves the plan writes - the two fixed leaves, nothing else under the PCSX2 tree (it used to register none while PCSX2 was Deferred)
+    $pcsx2Reg = @($reg | Where-Object { $_ -like '*Pcsx2*' -or $_ -like '*LilyPad*' -or $_ -like '*DenGo-Controller-Converter.lily' } | ForEach-Object { DgP-Full $_ } | Sort-Object)
+    $pcsx2Want = @($C.Plan | Where-Object { $_.Platform -eq 'PCSX2' -and $_.Action -in @('Add', 'UpdateOrRepair') } | ForEach-Object { DgP-Full $_.Destination } | Sort-Object)
+    $pcsx2Leaves = @($pcsx2Reg | ForEach-Object { [System.IO.Path]::GetFileName($_) } | Sort-Object)
+    [void](Assert-I2A ("A-$sc-pcsx2-never-registered") (($pcsx2Want.Count -eq 2) -and (($pcsx2Reg -join '|') -ceq ($pcsx2Want -join '|')) -and (($pcsx2Leaves -join ',') -ceq 'DenGo-Controller-Converter.lily,LilyPad.ini')) ("registered PCSX2 paths: $($pcsx2Reg.Count) (planned writes: $($pcsx2Want.Count)) - exactly the two fixed leaves: $($pcsx2Leaves -join ',')"))
+    [void](Assert-I2A ("A-$sc-only-fixed-leaves-registered") (@($reg | Where-Object { (-not ($_ -like '*DenGoControllerConverter.exe')) -and (-not ($_ -like '*DenGo-Controller-Converter.ico')) -and (-not ($_ -like '*DenGoControllerConverter.dll')) -and (-not ($_ -like '*DenGoVehicleSpec.BveEx.Bridge.dll')) -and (-not ($_ -like '*DenGoBveVehicleSpec.dll')) -and (-not ($_ -like '*DenGoVehicleSpec.AtsExLegacy.Bridge.dll')) -and (-not ($_ -like '*DenGoAtsExLegacyVehicleSpec.dll')) -and (-not ($_ -like '*Den-Go-Controller.yml')) -and (-not ($_ -like '*\inis\LilyPad.ini')) -and (-not ($_ -like '*\inis\DenGo-Controller-Converter.lily')) -and (-not ($_ -like '*DenGo Controller Converter.lnk')) }).Count -eq 0) ("every registered path is one of the fixed leaves (the two PCSX2 leaves included since I3)"))
     # without the shortcut: the post tree used when a shortcut failure is reported as non-fatal
     Reset-Case $C
     Reset-I2AFault; Reset-I2ACounters
@@ -417,7 +433,8 @@ if ($ctxs.ContainsKey('P2')) {
     $C = $ctxs['P2']; $L = $C.L; $P = $L.Product
     Reset-Case $C
     Reset-I2AFault; Reset-I2ACounters
-    $skipPlan = @($C.Plan | Where-Object { $_.Platform -in @('Core', 'RPCS3', 'PCSX2') })
+    $preStateN14 = Get-I2BStateObject $L
+    $skipPlan = @($C.Plan | Where-Object { $_.Platform -in @('Core', 'RPCS3') })    # I3-D follow-up: PCSX2 is left out of the plan too (it used to be planned and Deferred) - its earlier record is then carried, not closed
     $r = Run-Product $C ([object[]]$skipPlan) $false
     $st = Get-I2BStateObject $L
     $byDest = @{}; foreach ($f in @($st.Files)) { $byDest[$f.Destination.ToUpperInvariant()] = $f }
@@ -428,7 +445,9 @@ if ($ctxs.ContainsKey('P2')) {
     [void](Assert-I2A 'N14-carried-forward' (($r.Succeeded -eq $true) -and $okFiles -and ($carried.Count -ge 6)) "succeeded=$($r.Succeeded) carried=$($carried.Count): BVE5/6, BveEX Current and Legacy records survive although this run did not plan them")
     [void](Assert-I2A 'N14-carried-files-untouched' ((Get-I2AFileSha $c5) -eq $C.PreMap['f:' + (Rel $C $c5)]) 'the carried files themselves were not touched')
     [void](Assert-I2A 'N14-closed-record' ((@($st.ClosedRecords).Count -eq 1) -and ($st.ClosedRecords[0].Reason -eq 'NoOwnershipAndMissing')) "ClosedRecords=$(@($st.ClosedRecords).Count)")
-    [void](Assert-I2A 'N14-deferred-pcsx2-record-carried' ((@($st.Files | Where-Object { $_.Presence -eq 'DeferredThisRun' }).Count -eq 1)) 'the earlier PCSX2 record is carried while PCSX2 is deferred')
+    $pcsx2Carried = @($st.Files | Where-Object { $_.Platform -eq 'PCSX2' })
+    $pcsx2Before = @($preStateN14.Files | Where-Object { $_.Platform -eq 'PCSX2' })
+    [void](Assert-I2A 'N14-deferred-pcsx2-record-carried' ((@($st.Files | Where-Object { $_.Presence -eq 'DeferredThisRun' }).Count -eq 0) -and ($pcsx2Carried.Count -eq 1) -and ($pcsx2Carried[0].Presence -eq 'NotDetectedThisRun') -and ($pcsx2Carried[0].Ownership -eq 'ReplacedExisting') -and ($pcsx2Before.Count -eq 1) -and ($pcsx2Carried[0].BeforeSHA256 -eq $pcsx2Before[0].BeforeSHA256) -and ($pcsx2Carried[0].Backup -eq $pcsx2Before[0].Backup)) 'the earlier PCSX2 record is carried as NotDetectedThisRun with its Origin unchanged (DeferredThisRun is never produced any more)')
     # uninstaller dry run (read-only): the state written here must not make it stop with UnsafeOrUnknown
     $out = Join-Path $L.Stage 'UninstallPreview'
     $psi = New-Object System.Diagnostics.ProcessStartInfo
@@ -444,15 +463,15 @@ if ($ctxs.ContainsKey('P2')) {
     $items = @()
     if ([System.IO.File]::Exists($planJson)) { $items = @(([System.IO.File]::ReadAllText($planJson, [System.Text.Encoding]::UTF8) | ConvertFrom-Json).Items) }
     # I2-C: the engine builds its layout with the fixed literal C:\Users\Public for BveEX Current / AtsEX Legacy, so the sandbox copies of those records are (correctly) not DenGo leaves; every other record must be understood
-    $unsafe = @($items | Where-Object { $_.Action -eq 'UnsafeOrUnknown' -and $_.Platform -notin @('BveEX Current', 'AtsEX Legacy') })
+    $unsafe = @(Get-UnsafeDryRunItems $L $items)
     [void](Assert-I2A 'N14-uninstaller-dryrun-reads-new-state' (($prc.ExitCode -eq 0) -and ($items.Count -ge 12) -and ($unsafe.Count -eq 0)) "exit=$($prc.ExitCode) items=$($items.Count) unsafe=$($unsafe.Count) err=[$($errTask.Result.Trim())]")
     $carriedActions = @($items | Where-Object { $_.Destination -eq $c5 } | ForEach-Object { $_.Action })
     [void](Assert-I2A 'N14-uninstaller-sees-carried-record' ($carriedActions.Count -eq 1 -and $carriedActions[0] -eq 'Remove') "action for the carried BVE5 file: $($carriedActions -join ',')")
     $closedDest = Join-Path $L.Root 'OldRpcs3\Den-Go-Controller.yml'
     $closedActions = @($items | Where-Object { $_.Destination -eq $closedDest } | ForEach-Object { $_.Action })
     [void](Assert-I2A 'N14-closed-record-is-never-a-removal' ((@($st.ClosedRecords | Where-Object { $_.Record.Destination -eq $closedDest }).Count -eq 1) -and (@($closedActions | Where-Object { $_ -eq 'Remove' }).Count -eq 0)) "closed record moved to ClosedRecords; the uninstaller's actions for it: [$($closedActions -join ',')] (never Remove)")
-    $pcsx2Rec = @($st.Files | Where-Object { $_.Presence -eq 'DeferredThisRun' })
-    [void](Assert-I2A 'N14-deferred-record-stays-in-files-not-closed' (($pcsx2Rec.Count -eq 1) -and (@($st.ClosedRecords | Where-Object { $_.Record.Platform -eq 'PCSX2' }).Count -eq 0)) 'the PCSX2 record stays in Files for I3')
+    $pcsx2Rec = @($st.Files | Where-Object { $_.Platform -eq 'PCSX2' -and $_.Presence -eq 'NotDetectedThisRun' })
+    [void](Assert-I2A 'N14-deferred-record-stays-in-files-not-closed' (($pcsx2Rec.Count -eq 1) -and (@($st.ClosedRecords | Where-Object { $_.Record.Platform -eq 'PCSX2' }).Count -eq 0)) 'the PCSX2 record stays in Files and is never closed')
     Reset-Case $C
 }
 
@@ -648,10 +667,17 @@ foreach ($sc in @('P1', 'P2')) {
     Reset-I2AFault; Reset-I2ACounters
     $r = Run-Product $C $null $true
     $deferred = @($r.Results | Where-Object { $_.Action -eq 'Deferred' })
-    $pcsx2Pre = @($C.PreMap.Keys | Where-Object { $_ -like 'f:pcsx2\*' })
+    # I3-D follow-up: PCSX2 is not deferred any more. No Deferred row and no DeferredItems; the two PCSX2 rows carry the plan's Action; only the two fixed leaves change, every other PCSX2 file is byte-identical
+    $pcsx2Rows = @($r.Results | Where-Object { $_.Platform -eq 'PCSX2' })
+    $pcsx2Plan = @($C.Plan | Where-Object { $_.Platform -eq 'PCSX2' })
+    $rowMismatch = @($pcsx2Plan | Where-Object { $pi = $_; @($pcsx2Rows | Where-Object { $_.Component -eq $pi.Component -and $_.Action -eq $pi.Action -and $_.Succeeded -eq $true }).Count -ne 1 })
+    $leafRel = @($pcsx2Plan | ForEach-Object { 'f:' + (Rel $C $_.Destination) })
+    $pcsx2Pre = @($C.PreMap.Keys | Where-Object { $_ -like 'f:pcsx2\*' -and ($leafRel -notcontains $_) })
     $same = $true; $post = Tree $C; foreach ($k in $pcsx2Pre) { if ($post[$k] -ne $C.PreMap[$k]) { $same = $false } }
-    [void](Assert-I2A "N18-$sc-pcsx2-deferred-explicit" (($r.Succeeded -eq $true) -and ($deferred.Count -eq 2) -and (@($deferred | Where-Object { $_.Succeeded -ne $true -or $_.Applied -ne $false -or $_.Reason -ne 'DeferredToI3' }).Count -eq 0) -and ($r.DeferredItems.Count -eq 2)) "succeeded=$($r.Succeeded) deferred=$($deferred.Count): Action='Deferred', Applied=false, Succeeded=true, Reason=DeferredToI3; the install as a whole is not Failed")
-    [void](Assert-I2A "N18-$sc-lilypad-untouched" ($same -and (-not $post.ContainsKey('f:pcsx2\inis\denGo-controller-converter.lily'.ToLowerInvariant()) -or $C.PreMap.ContainsKey('f:pcsx2\inis\dengo-controller-converter.lily'))) 'LilyPad.ini, PCSX2.ini and the DenGo profile are byte-identical to the pre state; no PCSX2 file was created')
+    $leafBytes = $true; foreach ($pi in $pcsx2Plan) { if ($post['f:' + (Rel $C $pi.Destination)] -ne (Get-I2AFileSha $pi.Source)) { $leafBytes = $false } }
+    $newPcsx2 = @($post.Keys | Where-Object { $_ -like 'f:pcsx2\*' -and -not $C.PreMap.ContainsKey($_) -and ($leafRel -notcontains $_) })
+    [void](Assert-I2A "N18-$sc-pcsx2-deferred-explicit" (($r.Succeeded -eq $true) -and ($deferred.Count -eq 0) -and ($r.DeferredItems.Count -eq 0) -and ($pcsx2Plan.Count -eq 2) -and ($pcsx2Rows.Count -eq 2) -and ($rowMismatch.Count -eq 0)) "succeeded=$($r.Succeeded) deferred=$($deferred.Count) pcsx2 rows=$($pcsx2Rows.Count) of $($pcsx2Plan.Count) planned, Action mismatches=$($rowMismatch.Count): no Deferred row, DeferredItems is empty, the install is not Failed")
+    [void](Assert-I2A "N18-$sc-lilypad-untouched" ($same -and $leafBytes -and ($newPcsx2.Count -eq 0)) "PCSX2.ini and every other PCSX2 file are byte-identical; the two fixed leaves carry the source bytes ($leafBytes); no other PCSX2 file was created ($($newPcsx2.Count))")
     $tx = @($r.Results | Where-Object { $_.Platform -eq 'Core' -and $_.Component -eq 'Application' })
     [void](Assert-I2A "N18-$sc-core-application-result-once" ($tx.Count -eq 1) 'exactly one Core/Application row (the I1 commit check needs it)')
     # RPCS3: only the DenGo profile is written
@@ -735,7 +761,7 @@ if ($ctxs.ContainsKey('P1')) {
     $sc4 = Get-ScState $L
     [void](Assert-I2A 'F2-stage-failure-keeps-the-record' (($r4.Succeeded -eq $true) -and ($r4.ShortcutError -like 'ShortcutStagingFailed*') -and ($sc4.Created -eq $true) -and ($sc4.PreExisted -eq $false) -and ($sc4.Path -eq $P.ShortcutPath)) "error=[$($r4.ShortcutError)] created=$($sc4.Created) preExisted=$($sc4.PreExisted): the earlier correct record is not overwritten with Created=false")
     $dry = Invoke-UninstallDryRun $L
-    [void](Assert-I2A 'F2-uninstaller-dryrun-reads-the-state' (($dry.ExitCode -eq 0) -and (@($dry.Items | Where-Object { $_.Action -eq 'UnsafeOrUnknown' -and $_.Platform -notin @('BveEX Current', 'AtsEX Legacy') }).Count -eq 0) -and ($dry.Items.Count -ge 1)) "exit=$($dry.ExitCode) items=$($dry.Items.Count) err=[$($dry.Err.Trim())]")
+    [void](Assert-I2A 'F2-uninstaller-dryrun-reads-the-state' (($dry.ExitCode -eq 0) -and (@(Get-UnsafeDryRunItems $L $dry.Items).Count -eq 0) -and ($dry.Items.Count -ge 1)) "exit=$($dry.ExitCode) items=$($dry.Items.Count) err=[$($dry.Err.Trim())]")
     # c: the user had a shortcut of that name before the first install -> true, and it stays true; the backup of the user's shortcut is never lost
     Reset-Case $C
     Reset-I2AFault; Reset-I2ACounters
@@ -749,7 +775,7 @@ if ($ctxs.ContainsKey('P1')) {
     [void](Assert-I2A 'F2-preexisting-is-true' (($r1.Succeeded -eq $true) -and ($sc1.PreExisted -eq $true) -and ($sc1.BackupSHA256 -eq $userSha) -and (@($sc1.Backups).Count -eq 1)) "preExisted=$($sc1.PreExisted)")
     [void](Assert-I2A 'F2-preexisting-stays-true' (($r2.Succeeded -eq $true) -and ($sc2.PreExisted -eq $true) -and ($sc2.Backup -eq $sc1.Backup) -and ($sc2.BackupSHA256 -eq $userSha) -and $bakOk) "reinstall: preExisted=$($sc2.PreExisted); the origin backup still holds the user's shortcut ($bakOk)")
     $dry = Invoke-UninstallDryRun $L
-    [void](Assert-I2A 'F2-uninstaller-dryrun-reads-the-preexisting-state' (($dry.ExitCode -eq 0) -and (@($dry.Items | Where-Object { $_.Action -eq 'UnsafeOrUnknown' -and $_.Platform -notin @('BveEX Current', 'AtsEX Legacy') }).Count -eq 0)) "exit=$($dry.ExitCode) items=$($dry.Items.Count)")
+    [void](Assert-I2A 'F2-uninstaller-dryrun-reads-the-preexisting-state' (($dry.ExitCode -eq 0) -and (@(Get-UnsafeDryRunItems $L $dry.Items).Count -eq 0)) "exit=$($dry.ExitCode) items=$($dry.Items.Count)")
     # d: the user edited the shortcut we created -> Diverged: not overwritten, no item, the recorded facts stay
     Reset-Case $C
     Reset-I2AFault; Reset-I2ACounters
@@ -797,11 +823,15 @@ if ($ctxs.ContainsKey('P3z')) {
     $C = $ctxs['P3z']; $L = $C.L; $P = $L.Product
     Reset-Case $C
     Reset-I2AFault; Reset-I2ACounters
-    $r = Run-Product $C $null $false
+    # I3-D follow-up: in P3 the two PCSX2 files differ from their sources, so they are now written. The zero-item contract is checked with those two items reported as Unchanged
+    # (the plan the engine builds when the PCSX2 files already equal their sources): no transaction item at all, the state alone is committed.
+    $zeroPlan = [object[]]@($C.Plan | ForEach-Object { if ($_.Platform -eq 'PCSX2') { $item0 = $_.PSObject.Copy(); $item0.Action = 'Unchanged'; $item0 } else { $_ } })
+    $r = Run-Product $C $zeroPlan $false
     $hist = @(Get-I2BHistoryJournals $L)
     $stages = @((DgJournal-Parse $hist[0]).Records | ForEach-Object { $_.stage })
     $st = Get-I2BStateObject $L
-    [void](Assert-I2A 'N21-zero-item-commits-a-new-state' (($r.Succeeded -eq $true) -and (($stages -join ',') -eq 'Begin,CommitIntent,Committed') -and ($st.StateRevision -eq 2) -and ($st.TransactionId -eq [string]$r.TransactionId) -and (Test-I2BStateValid $L)) ("stages=$($stages -join ',') revision=$($st.StateRevision)"))
+    $stRev = $(if ($null -ne $st -and $null -ne $st.PSObject.Properties['StateRevision']) { $st.StateRevision } else { '<none>' })
+    [void](Assert-I2A 'N21-zero-item-commits-a-new-state' (($r.Succeeded -eq $true) -and (($stages -join ',') -eq 'Begin,CommitIntent,Committed') -and ($stRev -eq 2) -and ($st.TransactionId -eq [string]$r.TransactionId) -and (Test-I2BStateValid $L)) ("succeeded=$($r.Succeeded) code=$($r.ErrorCode) msg=$($r.ErrorMessage) stages=$($stages -join ',') revision=$stRev"))
     $diff = @(Compare-I2ATree $C.PreMap (Tree $C))
     [void](Assert-I2A 'N21-only-the-state-changed' (($diff.Count -eq 1) -and ($diff[0] -eq '~x:state')) ("diff=[$($diff -join ' ')]"))
     # GUI commit condition (the same checks as DenGoInstallerGui.ps1 Test-ApplyCommitted)

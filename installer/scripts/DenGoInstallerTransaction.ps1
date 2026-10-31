@@ -9,9 +9,13 @@
 #   - Recovery is two-phase: Phase 1 is read-only verification of everything; Phase 2 (reverse restore) only if Phase 1 passed.
 #   - Any destination SHA that is neither the journaled pre-SHA nor the journaled post-SHA => RepairRequired, zero changes.
 #   - Mutex abandonment is never evidence of an interrupted run; the marker + journal are.
+#   - Replace and Delete are conditional (TOCTOU contract): the old content is pushed aside to a derived, dedicated displaced name next to the destination,
+#     its SHA is compared with the journaled pre-SHA, and only then is it dropped. A mismatch keeps the other party's content (nothing is overwritten).
+#     The displaced name is derived (destination + transaction id + item id + dedicated suffix), never journaled; recovery re-derives it.
 
 function DgConst-ZeroHash { return ('0' * 64) }
 function DgConst-TmpSuffix { return '.dengo.tmp' }
+function DgConst-DisplacedSuffix { return '.dengo.old' }
 function DgConst-Stages { return @('Begin','Register','Intent','Applied','Verified','CommitIntent','Committed','RollbackBegin','RollbackIntent','RolledBack','RollbackIncomplete','RollbackComplete') }
 function DgConst-MarkerName { param([string]$Operation) if ([string]::Equals($Operation,'Uninstall',[System.StringComparison]::Ordinal)) { return 'uninstalling.json' } else { return 'installing.json' } }
 
@@ -128,12 +132,15 @@ function DgFs-CopyFileDurable {
     } finally { $in.Dispose() }
 }
 function DgFs-Replace {
-    param([string]$Temporary,[string]$Destination)
+    # One physical replacement. Without $Displaced the old content is dropped (the original behaviour); with it the old content is left at that path.
+    param([string]$Temporary,[string]$Destination,[string]$Displaced = '')
+    $keep = [System.Management.Automation.Language.NullString]::Value
+    if ($Displaced.Length -gt 0) { $keep = $Displaced }
     $attempt = 0
     while ($true) {
         $attempt++
         try {
-            [System.IO.File]::Replace($Temporary,$Destination,[System.Management.Automation.Language.NullString]::Value)
+            [System.IO.File]::Replace($Temporary,$Destination,$keep)
             return
         } catch {
             $inner = DgError-Root $_.Exception
@@ -441,12 +448,41 @@ function DgJournal-Summarize {
 }
 
 # ---------------------------------------------------------------- context / guard
+# Pure: the single displaced name of an item (same directory as its destination). Derived from the normalized destination, the transaction id,
+# the item id (the journal's itemId) and the dedicated suffix; never recorded in the journal.
+function DgTx-DisplacedPath {
+    param([string]$Norm,[string]$TxnId,[int]$ItemId)
+    return ($Norm + '.' + $TxnId + '.' + ('{0:D4}' -f $ItemId) + (DgConst-DisplacedSuffix))
+}
+# Read-only look at an item's displaced file. State: Absent | Owned | NotOwned (Reason says why). Owned needs ALL of: a regular file (no directory),
+# no reparse point, a journaled Intent for the item, and a content SHA equal to the planned pre-SHA. Whatever else sits at that name is not ours and is never touched.
+function DgTx-DisplacedInspect {
+    param([hashtable]$Item,[bool]$HasIntent)
+    $p = [string](DgProp $Item 'Displaced' '')
+    $r = @{ State = 'Absent'; Sha = ''; Reason = '' }
+    if ($p.Length -eq 0) { return $r }
+    $isDir = DgFs-DirExists $p
+    $isFile = $false
+    if (-not $isDir) { $isFile = DgFs-Exists $p }
+    if (-not $isDir -and -not $isFile) { return $r }
+    $r.State = 'NotOwned'
+    if ($isDir) { $r.Reason = 'Directory'; return $r }
+    $rp = DgFs-GetReparseComponents $p ([System.IO.Path]::GetDirectoryName($p))
+    if (@($rp).Count -ne 0) { $r.Reason = 'ReparsePoint'; return $r }
+    if (-not $HasIntent) { $r.Reason = 'NoIntent'; return $r }
+    try { $r.Sha = DgFs-Sha256 $p } catch { $r.Reason = 'Unreadable'; return $r }
+    if (-not (DgEq $r.Sha ([string]$Item.PreSha))) { $r.Reason = 'ShaMismatch'; return $r }
+    $r.State = 'Owned'
+    return $r
+}
 function DgTx-NewAllowed {
     param([string]$StateRoot,[string]$BackupRoot,[string]$TxnId,[string]$NewStatePath,[object[]]$Items)
-    $a = @{ Dest = @{}; Tmp = @{}; Backup = @{}; Dir = @{}; Infra = @{} }
+    $a = @{ Dest = @{}; Tmp = @{}; Backup = @{}; Dir = @{}; Infra = @{}; Displaced = @{} }
     foreach ($it in @($Items)) {
         $a.Dest[([string]$it.Norm).ToUpperInvariant()] = $true
         $a.Tmp[([string]$it.Tmp).ToUpperInvariant()] = $true
+        $dp = [string](DgProp $it 'Displaced' '')
+        if ($dp.Length -gt 0) { $a.Displaced[$dp.ToUpperInvariant()] = $true }
         if (([string]$it.Backup).Length -gt 0) { $a.Backup[([string]$it.Backup).ToUpperInvariant()] = $true }
         foreach ($d in @($it.Dirs)) { $a.Dir[([string]$d).ToUpperInvariant()] = $true }
     }
@@ -476,7 +512,13 @@ function DgG-Assert {
 }
 function DgG-CopyFile { param([hashtable]$Ctx,[string]$Source,[string]$Destination,[string]$Kind) DgG-Assert $Ctx $Destination $Kind; DgFs-CopyFileDurable $Source $Destination }
 function DgG-CreateFile { param([hashtable]$Ctx,[string]$Path,[byte[]]$Bytes,[string]$Kind) DgG-Assert $Ctx $Path $Kind; DgFs-CreateFileDurable $Path $Bytes }
-function DgG-Replace { param([hashtable]$Ctx,[string]$Temporary,[string]$Destination,[string]$Kind,[string]$TmpKind = 'Tmp') DgG-Assert $Ctx $Destination $Kind; DgG-Assert $Ctx $Temporary $TmpKind; DgFs-Replace $Temporary $Destination }
+function DgG-Replace {
+    param([hashtable]$Ctx,[string]$Temporary,[string]$Destination,[string]$Kind,[string]$TmpKind = 'Tmp',[string]$Displaced = '',[string]$DisplacedKind = 'Displaced')
+    DgG-Assert $Ctx $Destination $Kind
+    DgG-Assert $Ctx $Temporary $TmpKind
+    if ($Displaced.Length -gt 0) { DgG-Assert $Ctx $Displaced $DisplacedKind; DgFs-Replace $Temporary $Destination $Displaced }
+    else { DgFs-Replace $Temporary $Destination }
+}
 function DgG-MoveNew { param([hashtable]$Ctx,[string]$Source,[string]$Destination,[string]$Kind,[string]$SourceKind) DgG-Assert $Ctx $Destination $Kind; DgG-Assert $Ctx $Source $SourceKind; DgFs-MoveNew $Source $Destination }
 function DgG-Delete { param([hashtable]$Ctx,[string]$Path,[string]$Kind) DgG-Assert $Ctx $Path $Kind; DgFs-Delete $Path }
 function DgG-CreateDir { param([hashtable]$Ctx,[string]$Path,[string]$Kind) DgG-Assert $Ctx $Path $Kind; return (DgFs-CreateDir $Path) }
@@ -555,6 +597,14 @@ function DgTx-Begin {
         $preExists = DgFs-Exists $norm
         $preSha = ''
         if ($preExists) { $preSha = DgFs-Sha256 $norm }
+        # an existing destination is never dropped in place: its old content is pushed aside to the derived displaced name, which must be usable
+        $displaced = ''
+        if ($preExists) {
+            $displaced = DgTx-DisplacedPath $norm $txnId $id
+            $dt = DgPolicy-TestPath $Policy $displaced
+            if (-not $dt.Allowed) { throw (DgError 'PlanInvalid' ('Item ' + $id + ': displaced-file path rejected: ' + $dt.Reason)) }
+            if ([System.IO.Path]::GetFileName($displaced).Length -gt 255) { throw (DgError 'PlanInvalid' ('Item ' + $id + ': the displaced-file name is too long.')) }
+        }
         $source = ''; $sourceSha = ''; $postSha = ''
         if (DgEq $op 'Write') {
             $source = [System.IO.Path]::GetFullPath([string]$raw.Source)
@@ -579,10 +629,16 @@ function DgTx-Begin {
             Id = $id; Op = $op; Path = [string]$raw.Destination; Norm = $norm; Source = $source; SourceSha = $sourceSha
             PreExists = $preExists; PreSha = $preSha; PostSha = $postSha
             Backup = $(if ($preExists) { [System.IO.Path]::Combine($backupTxnDir,('{0:D4}.bak' -f $id)) } else { '' })
-            Tmp = $tmp; Dirs = [string[]]@($dirs); Reparse = [string[]]@($t.Reparse)
+            Tmp = $tmp; Displaced = $displaced; Dirs = [string[]]@($dirs); Reparse = [string[]]@($t.Reparse)
             Ownership = [string](DgProp $raw 'OwnershipCandidate' ''); Tag = [string](DgProp $raw 'Tag' '')
         })
         $id++
+    }
+    # no destination may be the displaced name of any item of this transaction
+    $displacedSet = @{}
+    foreach ($bi in $built) { if (([string]$bi.Displaced).Length -gt 0) { $displacedSet[([string]$bi.Displaced).ToUpperInvariant()] = $true } }
+    foreach ($bi in $built) {
+        if ($displacedSet.ContainsKey(([string]$bi.Norm).ToUpperInvariant())) { throw (DgError 'PlanInvalid' ('Item ' + $bi.Id + ': the destination is the displaced-file name of another item.')) }
     }
     $oldStateSha = ''
     if (DgFs-Exists $NewStatePath) { $oldStateSha = DgFs-Sha256 $NewStatePath }
@@ -651,13 +707,28 @@ function DgTx-ApplyItem {
     DgTx-Journal $Ctx 'Intent' $f
 
     foreach ($d in @($Item.Dirs)) { if (-not (DgFs-DirExists $d)) { [void](DgG-CreateDir $Ctx $d 'Dir') } }
+    $disp = [string](DgProp $Item 'Displaced' '')
     if ($isWrite) {
         if (DgFs-Exists $Item.Tmp) { DgG-Delete $Ctx $Item.Tmp 'Tmp' }
         DgG-CopyFile $Ctx $Item.Source $Item.Tmp 'Tmp'
         if (-not (DgEq (DgFs-Sha256 $Item.Tmp) $Item.PostSha)) { throw (DgError 'TmpVerifyFailed' ('Temporary copy SHA mismatch: ' + $Item.Tmp)) }
         if ($Item.PreExists) {
             DgFs-ProbeExclusive $Item.Norm
-            DgG-Replace $Ctx $Item.Tmp $Item.Norm 'Dest'
+            # conditional replacement: the old content is left at the derived displaced name (never over an existing file), measured, and only then dropped
+            if ((DgFs-Exists $disp) -or (DgFs-DirExists $disp)) { throw (DgError 'PlanStale' ('The displaced-file name is already taken: ' + $disp)) }
+            DgG-Replace $Ctx $Item.Tmp $Item.Norm 'Dest' 'Tmp' $disp 'Displaced'
+            $ins = DgTx-DisplacedInspect $Item $true
+            if ($ins.State -ne 'Owned') {
+                if (-not (DgEq $ins.Reason 'ShaMismatch')) { throw (DgError 'PlanStale' ('The pushed-aside old content could not be verified (' + $ins.State + ' ' + $ins.Reason + '): ' + $disp)) }
+                # somebody else changed the destination before the swap: give their content back, but only while the destination still holds ours
+                if (-not (DgFs-Exists $Item.Norm) -or -not (DgEq (DgFs-Sha256 $Item.Norm) $Item.PostSha)) { throw (DgError 'PlanStale' ('The destination changed again; both contents are kept: ' + $Item.Norm)) }
+                DgG-Replace $Ctx $disp $Item.Norm 'Dest' 'Displaced'
+                throw (DgError 'PlanStale' ('Destination changed since planning (the other content was put back): ' + $Item.Norm))
+            }
+            # cleanup: ownership and SHA are measured again right before the displaced file is dropped
+            $ins = DgTx-DisplacedInspect $Item $true
+            if ($ins.State -ne 'Owned') { throw (DgError 'PlanStale' ('The pushed-aside old content changed before its cleanup: ' + $disp)) }
+            DgG-Delete $Ctx $disp 'Displaced'
         } else {
             DgG-MoveNew $Ctx $Item.Tmp $Item.Norm 'Dest' 'Tmp'
         }
@@ -665,7 +736,19 @@ function DgTx-ApplyItem {
         if (DgFs-Exists $Item.Norm) { $observed = DgFs-Sha256 $Item.Norm }
     } else {
         DgFs-ProbeExclusive $Item.Norm
-        DgG-Delete $Ctx $Item.Norm 'Dest'
+        if (-not (DgFs-Exists $Item.Norm)) { throw (DgError 'PlanStale' ('Destination disappeared: ' + $Item.Norm)) }
+        if (-not (DgEq (DgFs-Sha256 $Item.Norm) $Item.PreSha)) { throw (DgError 'PlanStale' ('Destination changed since planning: ' + $Item.Norm)) }
+        if ((DgFs-Exists $disp) -or (DgFs-DirExists $disp)) { throw (DgError 'PlanStale' ('The displaced-file name is already taken: ' + $disp)) }
+        # a delete moves the file aside instead of removing it; the move never overwrites
+        DgG-MoveNew $Ctx $Item.Norm $disp 'Displaced' 'Dest'
+        $ins = DgTx-DisplacedInspect $Item $true
+        if ($ins.State -ne 'Owned') {
+            if (-not (DgEq $ins.Reason 'ShaMismatch')) { throw (DgError 'PlanStale' ('The moved-aside file could not be verified (' + $ins.State + ' ' + $ins.Reason + '): ' + $disp)) }
+            # somebody else changed the file before the move: give it back (a move cannot overwrite, so a re-created destination keeps both)
+            if (DgFs-Exists $Item.Norm) { throw (DgError 'PlanStale' ('The destination was re-created; both contents are kept: ' + $Item.Norm)) }
+            DgG-MoveNew $Ctx $disp $Item.Norm 'Dest' 'Displaced'
+            throw (DgError 'PlanStale' ('Destination changed since planning (the other content was put back): ' + $Item.Norm))
+        }
         $observed = ''
         if (DgFs-Exists $Item.Norm) { $observed = '<present>' }
     }
@@ -673,6 +756,12 @@ function DgTx-ApplyItem {
     $a.Add('observedPostSha',$observed)
     DgTx-Journal $Ctx 'Applied' $a
     if (-not (DgEq $observed $Item.PostSha)) { throw (DgError 'PostShaMismatch' ('Post-write SHA mismatch: ' + $Item.Norm)) }
+    if (-not $isWrite) {
+        # Applied means moved aside and verified; the cleanup that follows is not part of it
+        $ins = DgTx-DisplacedInspect $Item $true
+        if ($ins.State -ne 'Owned') { throw (DgError 'PlanStale' ('The moved-aside file changed before its cleanup: ' + $disp)) }
+        DgG-Delete $Ctx $disp 'Displaced'
+    }
     $v = DgTx-ItemFields $Item
     $v.Add('verifiedSha',$observed)
     DgTx-Journal $Ctx 'Verified' $v
@@ -691,12 +780,17 @@ function DgTx-Apply {
 
 # ---------------------------------------------------------------- classification / preflight (read-only)
 function DgTx-ItemState {
-    param([hashtable]$Item)
+    param([hashtable]$Item,[bool]$DisplacedOwned = $false)
     $exists = DgFs-Exists $Item.Norm
     if (-not $exists) {
         if (DgFs-DirExists $Item.Norm) { return @{ State = 'unknown'; Sha = '<directory>' } }
         if (-not $Item.PreExists -and (DgEq $Item.Op 'Write')) { return @{ State = 'pre'; Sha = '' } }
-        if (DgEq $Item.Op 'Delete') { return @{ State = 'post'; Sha = '' } }
+        if (DgEq $Item.Op 'Delete') {
+            # A missing Delete destination is DenGo's own work when it was recorded as applied, or when its owned displaced copy exists (moved aside, not yet applied).
+            # Intent without either is a third party's deletion (or a lost displaced copy): it is never recreated, so the item is unknown.
+            if ($Item.HasApplied -or $DisplacedOwned -or -not $Item.HasIntent) { return @{ State = 'post'; Sha = '' } }
+            return @{ State = 'unknown'; Sha = '<missing>' }
+        }
         return @{ State = 'unknown'; Sha = '<missing>' }
     }
     $sha = DgFs-Sha256 $Item.Norm
@@ -743,6 +837,9 @@ function DgTx-Preflight {
     $backupTxnDir = [System.IO.Path]::Combine($BackupRoot,$txnId)
     $items = @($sum.Items)
     foreach ($it in $items) {
+        # the displaced name is derived again from the journal's own facts (never read from it): only an existing destination ever has one
+        $it.Displaced = ''
+        if ($it.PreExists) { $it.Displaced = DgTx-DisplacedPath $it.Norm $txnId $it.Id }
         $pt = DgPolicy-TestPath $Policy $it.Path
         if (-not $pt.Allowed) { & $add 'PathRejected' ($pt.Reason + ': ' + $it.Path) $it.Id; continue }
         if (-not (DgEq $pt.Normalized $it.Norm)) { & $add 'PathRejected' ('Normalized path differs: ' + $it.Path) $it.Id; continue }
@@ -773,7 +870,14 @@ function DgTx-Preflight {
     if ($region -eq 'RollForward') { $res.Ok = $true; return $res }
 
     foreach ($it in $items) {
-        try { $st = DgTx-ItemState $it } catch { & $add 'DestinationUnreadable' $it.Path $it.Id; continue }
+        # whatever sits at the displaced name must be ours (derived name, regular file, Intent, planned pre-SHA) or it is left alone and recovery stops
+        $dOwned = $false
+        if ($it.PreExists) {
+            try { $di = DgTx-DisplacedInspect $it $it.HasIntent } catch { & $add 'DisplacedUnreadable' $it.Displaced $it.Id; continue }
+            if ($di.State -eq 'NotOwned') { & $add 'DisplacedNotOwned' ($it.Displaced + ' reason=' + $di.Reason + ' sha=' + $di.Sha) $it.Id }   # recorded in addition to whatever else is wrong with the item
+            $dOwned = ($di.State -eq 'Owned')
+        }
+        try { $st = DgTx-ItemState $it $dOwned } catch { & $add 'DestinationUnreadable' $it.Path $it.Id; continue }
         if ($st.State -eq 'unknown') { & $add 'DestinationUnknownSha' ($it.Path + ' sha=' + $st.Sha) $it.Id; continue }
         $action = 'None'
         if ($st.State -eq 'post') {
@@ -785,7 +889,7 @@ function DgTx-Preflight {
                 $action = if (DgEq $it.Op 'Delete') { 'RestoreDeleted' } else { 'Restore' }
             } else { $action = 'RemoveNew' }
         }
-        [void]$res.Plan.Add(@{ Id = $it.Id; Action = $action; State = $st.State; Sha = [string]$st.Sha })
+        [void]$res.Plan.Add(@{ Id = $it.Id; Action = $action; State = $st.State; Sha = [string]$st.Sha; Cleanup = $dOwned })
     }
     if ($reasons.Count -ne 0) { return $res }
     $res.Ok = $true
@@ -884,16 +988,28 @@ function DgTx-ExecuteRecovery {
         } catch { return @{ Outcome = 'RollbackIncomplete'; Error = [string]$_.Exception.Message; Code = (DgError-Code $_.Exception); Reasons = [object[]]@(); ManualCheckRequired = $false } }
     }
     $failedItem = -1
+    $cleanupManual = $false
     $ended = [bool]$sum.RollbackComplete     # nothing may be appended after RollbackComplete (the parser treats it as the end of the journal)
     try {
         if (-not $sum.RollbackBegin) { DgTx-Journal $Ctx 'RollbackBegin' ([ordered]@{ reason = $Reason; by = $By }) }
         $items = @($Ctx.Items)
         $plan = @{}
         $planSha = @{}
-        foreach ($p in @($Pf.Plan)) { $plan[[int]$p.Id] = [string]$p.Action; $planSha[[int]$p.Id] = [string]$p.Sha }
+        $planCleanup = @{}
+        foreach ($p in @($Pf.Plan)) { $plan[[int]$p.Id] = [string]$p.Action; $planSha[[int]$p.Id] = [string]$p.Sha; $planCleanup[[int]$p.Id] = [bool](DgProp $p 'Cleanup' $false) }
         foreach ($it in @($items | Sort-Object { [int]$_.Id } -Descending)) {
             $action = [string]$plan[[int]$it.Id]
             if ($action -ne 'None') { $failedItem = [int]$it.Id; DgTx-RestoreItem $Ctx $it $action ([string]$planSha[[int]$it.Id]); $failedItem = -1 }
+            # An owned displaced file is dropped only after its destination has been restored AND verified (it is never moved back itself); ownership and SHA are measured again first.
+            # A refused cleanup stops recovery here: the file is kept, the marker and the journal stay, and a later run measures it again.
+            if (-not [bool]$planCleanup[[int]$it.Id]) { continue }
+            $failedItem = [int]$it.Id; $cleanupManual = $true
+            $ins = DgTx-DisplacedInspect $it $true
+            if ($ins.State -eq 'Owned') {
+                if (-not (DgFs-Exists $it.Norm) -or -not (DgEq (DgFs-Sha256 $it.Norm) $it.PreSha)) { throw (DgError 'RestoreVerifyFailed' ('The destination does not hold the planned content; the displaced file is kept: ' + $it.Norm)) }
+                DgG-Delete $Ctx $it.Displaced 'Displaced'
+            } elseif ($ins.State -eq 'NotOwned') { throw (DgError 'RestoreVerifyFailed' ('The displaced file is not ours any more (' + $ins.Reason + '); it is kept: ' + $it.Displaced)) }
+            $failedItem = -1; $cleanupManual = $false
         }
         foreach ($it in $items) { if (DgFs-Exists $it.Tmp) { DgG-Delete $Ctx $it.Tmp 'Tmp' } }
         if (DgFs-Exists $Ctx.NewStateTmp) { DgG-Delete $Ctx $Ctx.NewStateTmp 'Infra' }
@@ -910,7 +1026,7 @@ function DgTx-ExecuteRecovery {
         if ($code.Length -eq 0) { $code = 'RestoreFailed' }
         $message = [string](DgError-Root $_.Exception).Message
         $why = [pscustomobject]@{ Code = $code; Item = $failedItem; Detail = $message }   # not $reason: variable names are case-insensitive and $Reason is a [string] parameter
-        $manual = (@('DestinationChangedAfterPreflight', 'JournalChangedAfterRead') -contains $code)
+        $manual = ((@('DestinationChangedAfterPreflight', 'JournalChangedAfterRead') -contains $code) -or $cleanupManual)
         # record why the restore stopped (best effort), keep the marker and the journal, and leave a report for the operator
         if ($null -ne $Ctx.Journal) {
             if (-not $ended) { try {

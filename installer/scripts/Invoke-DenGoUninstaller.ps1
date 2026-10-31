@@ -44,7 +44,7 @@ function Assert-TargetProcessesStopped {
 }
 
 # I2-C: one all-or-nothing transaction (see DenGoUninstallerProductApply.ps1). The commit point is the atomic replace of uninstalled-state.json;
-# installed-state.json is archived to history and deleted inside the same transaction. PCSX2 / LilyPad records are deferred to I3.
+# installed-state.json is archived to history and deleted inside the same transaction. PCSX2 1.6.0 / LilyPad (I3) is a Set like the others: LilyPad.ini that a consent replaced is restored from its Origin, the .lily profile is kept.
 $productResult = $null
 $productError = ''
 try {

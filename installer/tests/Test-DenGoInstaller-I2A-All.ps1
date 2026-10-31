@@ -43,7 +43,10 @@ foreach ($s in @(
         @('I2A-Static', 'Test-DenGoInstaller-I2A-Static.ps1', @()),
         @('I2A-Unit', 'Test-DenGoInstaller-I2A-Unit.ps1', @()),
         @('I2A-Fault', 'Test-DenGoInstaller-I2A-Fault.ps1', $faultArgs),
-        @('I2A-Kill', 'Test-DenGoInstaller-I2A-Kill.ps1', @('-EvidenceDir', ('"' + $ReportDir + '"'))))) {
+        @('I2A-Kill', 'Test-DenGoInstaller-I2A-Kill.ps1', @('-EvidenceDir', ('"' + $ReportDir + '"'))),
+        # the TOCTOU contract (conditional replace / move-aside delete): contract mode; I2A.Toctou.TestSupport.ps1 and I2A.ToctouKill.TestSupport.ps1 are helpers, not suites
+        @('I2A-Toctou', 'Test-DenGoInstaller-I2A-Toctou.ps1', @('-Contract')),
+        @('I2A-ToctouKill', 'Test-DenGoInstaller-I2A-ToctouKill.ps1', @('-EvidenceDir', ('"' + $ReportDir + '"'))))) {
     [void]$results.Add((Invoke-Suite $s[0] (Join-Path $tests $s[1]) $s[2]))
 }
 if ($IncludeRegression) {

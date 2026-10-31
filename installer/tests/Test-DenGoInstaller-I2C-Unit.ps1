@@ -300,14 +300,21 @@ try {
     $x = Cl $recRep; $x.Component = 'EffectiveInputProfile'; [System.IO.File]::WriteAllText($ymlPath, 'edited', $script:Utf8)
     Is 'UC3-effective-profile-modified-is-user-change' (Dec $x $true) 'PreserveModified' '' 'a changed effective profile is a user change'
     Reset-Case
-    # --- PCSX2 / LilyPad: deferred, never read
-    foreach ($case in @(@('pcsx2-lily', 'InputProfile'), @('pcsx2-effective', 'EffectiveInputProfile'))) {
-        $x = New-I2CRecord 'PCSX2' $case[1] (Join-Path $L.Pcsx2Inis 'LilyPad.ini') 'ReplacedExisting' ('66' * 32) ('77' * 32) (Join-Path $P.BackupRoot 'nope\0001.bak') $true
-        $d = Dec $x $true
-        [void](Assert-I2A ('UC3-' + $case[0] + '-deferred') (($d.Decision -eq 'Deferred') -and ($d.Op -eq '') -and ($d.Blocking -eq $false) -and ($d.Origin -eq $null) -and ($d.CurrentSha -eq '')) "deferred: no SHA measured, no Origin, no item")
-    }
+    # --- PCSX2 / LilyPad (I3-D follow-up: not deferred any more - a real role like the others). The .lily is a profile and is kept by default; the LilyPad.ini that a consent replaced (ReplacedExisting) is
+    #     restored from its Origin whatever IncludeInputProfiles says (DE-I3-3); a record without an Origin is kept; an unknown ownership stops the uninstall like on every other platform.
+    $recPLily = Rec 'DenGo-Controller-Converter.lily' 'PCSX2'
+    $recPIni = Rec 'LilyPad.ini' 'PCSX2'
+    [void](Assert-I2A 'UC3-fixture-pcsx2-records' (($recPLily.Ownership -eq 'CreatedByInstaller') -and ($recPIni.Ownership -eq 'ReplacedExisting') -and (@($recPIni.Backups).Count -ge 1) -and ($recPIni.Backup -ceq $recPIni.Backups[0].Path)) "lily=$($recPLily.Ownership) LilyPad.ini=$($recPIni.Ownership) backups=$(@($recPIni.Backups).Count)")
+    $d = Dec $recPLily $false
+    [void](Assert-I2A 'UC3-pcsx2-lily-deferred' (($d.Decision -eq 'KeepProfile') -and ($d.Op -eq '') -and ($d.Blocking -eq $false)) "the .lily profile is kept by default => decision=$($d.Decision)/$($d.ReasonCode)")
+    $dDefault = Dec $recPIni $false; $dExplicit = Dec $recPIni $true
+    [void](Assert-I2A 'UC3-pcsx2-effective-deferred' (($dDefault.Decision -eq 'Restore') -and ($dDefault.ReasonCode -eq 'RestoreOrigin') -and ($dExplicit.Decision -eq 'Restore') -and ($null -ne $dDefault.Origin) -and ($dDefault.Origin.Path -ceq $recPIni.Backups[0].Path) -and ($dDefault.Origin.Sha -ceq $recPIni.BeforeSHA256) -and ($dDefault.Op.Length -gt 0)) "LilyPad.ini with a proven Origin is restored with and without IncludeInputProfiles => $($dDefault.Decision)/$($dDefault.ReasonCode) and $($dExplicit.Decision)")
+    $x = Cl $recPIni; $x.Ownership = 'MigratedMatchingDenGoFile'; $x.ExistedBefore = $false; $x.BeforeSHA256 = ''; $x.Backup = ''; $x.Backups = [object[]]@()
+    $dNoOrigin = Dec $x $false
+    [void](Assert-I2A 'UC3-pcsx2-effective-without-origin-is-kept' (($dNoOrigin.Decision -eq 'KeepProfile') -and ($dNoOrigin.Op -eq '') -and ($dNoOrigin.Blocking -eq $false)) "a LilyPad.ini without an Origin is never removed or restored => $($dNoOrigin.Decision)/$($dNoOrigin.ReasonCode)")
     $x = New-I2CRecord 'PCSX2' 'InputProfile' (Join-Path $L.Pcsx2Inis 'DenGo-Controller-Converter.lily') 'SomethingUnknown' 'garbage'
-    Is 'UC3-pcsx2-deferred-even-with-garbage' (Dec $x $true) 'Deferred' 'DeferredToI3' 'a PCSX2 record is deferred before any other check'
+    Blocked 'UC3-pcsx2-deferred-even-with-garbage' (Dec $x $true) 'UnsafeOrUnknown' 'an unknown ownership of a PCSX2 record stops the uninstall (no Deferred shortcut any more)'
+    Reset-Case
 
     # =================================================== UC4 shortcuts
     $stateNow = Get-I2CIs $L
@@ -443,7 +450,7 @@ try {
     [void](Assert-I2A 'UC6-shortcut-first-core-last-among-product-items' (($firstKinds[0] -eq 'Shortcut') -and (@($built.Metas | Where-Object { $_.Kind -eq 'File' } | Select-Object -Last 1 | ForEach-Object { $_.Decision.Platform })[0] -eq 'Core')) 'Install order reversed: shortcut first, Core last')
     $order = @($built.Metas | Where-Object { $_.Kind -eq 'File' } | ForEach-Object { $_.Decision.Platform })
     $sets = @(); foreach ($o in $order) { if ($sets.Count -eq 0 -or $sets[-1] -ne $o) { $sets += $o } }
-    [void](Assert-I2A 'UC6-set-order-is-the-reverse-of-install' (([string]::Join(',', $sets)) -eq 'RPCS3,AtsEX Legacy,BveEX Current,BVE6,BVE5,Core') ('sets: ' + [string]::Join(',', $sets)))
+    [void](Assert-I2A 'UC6-set-order-is-the-reverse-of-install' (([string]::Join(',', $sets)) -eq 'PCSX2,RPCS3,AtsEX Legacy,BveEX Current,BVE6,BVE5,Core') ('sets: ' + [string]::Join(',', $sets)))
     [void](Assert-I2A 'UC6-no-item-for-classes-that-are-not-touched' (@($built.Metas | Where-Object { $_.Kind -eq 'File' -and $_.Decision.Decision -notin @('Remove', 'Restore') }).Count -eq 0) 'only Remove / Restore decisions become items')
     # collision
     [System.IO.Directory]::CreateDirectory((Join-Path $P.StateRoot 'history')) | Out-Null
@@ -471,7 +478,12 @@ try {
     [void](Assert-I2A 'UC7-new-format-markers' (([int]$back.StateRevision -eq 2) -and ($back.UninstallTransactionId -eq $ctxFake.TxnId) -and ($back.Reconfirmation.Reconfirmed -eq $false) -and ($back.RollbackRoot -eq $ctxFake.BackupTxnDir)) 'StateRevision 2, UninstallTransactionId, RollbackRoot (legacy name)')
     $cg = $back.ClosedGeneration
     [void](Assert-I2A 'UC7-closed-generation' (($cg.GenerationId -ceq $prev.Sha.ToLowerInvariant()) -and ($cg.InstalledStateSha256 -ceq $cg.GenerationId) -and ($cg.ArchivedStateSha256 -ceq $cg.GenerationId) -and ($cg.ArchivedStatePath -eq $plan.Archive.IS.Path) -and ($cg.LastInstallTransactionId -eq (Get-I2CIs $L).TransactionId) -and ([int]$cg.StateRevision -eq 2) -and ($cg.LegacyFormat -eq $false) -and ($cg.ContaminationSuspect -eq $false) -and ([string]$cg.InstalledAt -eq [string](Get-I2CIs $L).InstalledAt)) 'state SHA, history path, history SHA, InstalledAt, LastInstallTransactionId, StateRevision')
-    [void](Assert-I2A 'UC7-counts-and-lists' (($back.Counts.Removed -ge 8) -and ($back.Counts.Restored -eq 1) -and (@($back.Items).Count -eq @($plan.FileDecisions).Count) -and (@($back.UsedBackups).Count -eq 1) -and ($back.UsedBackups[0].Purpose -eq 'RestoreOrigin') -and (@($back.UninstallBackups).Count -eq 1)) "Removed=$($back.Counts.Removed) Restored=$($back.Counts.Restored)")
+    # I3-D follow-up: two Origins are restored now (RPCS3's profile and PCSX2's LilyPad.ini); both are the Backups[0] of their own record
+    $usedDest = @($back.UsedBackups | ForEach-Object { [System.IO.Path]::GetFileName([string]$_.Destination) } | Sort-Object)
+    $recRpcs3Origin = (Get-I2CRecord (Get-I2CIs $L) 'Den-Go-Controller.yml' 'RPCS3'); $recPcsx2Origin = (Get-I2CRecord (Get-I2CIs $L) 'LilyPad.ini' 'PCSX2')
+    $usedPaths = @($back.UsedBackups | ForEach-Object { [string]$_.Path } | Sort-Object)
+    $expectedPaths = @([string]$recRpcs3Origin.Backups[0].Path, [string]$recPcsx2Origin.Backups[0].Path) | Sort-Object
+    [void](Assert-I2A 'UC7-counts-and-lists' (($back.Counts.Removed -ge 8) -and ($back.Counts.Restored -eq 2) -and (@($back.Items).Count -eq @($plan.FileDecisions).Count) -and (@($back.UsedBackups).Count -eq 2) -and (@($back.UsedBackups | Where-Object { $_.Purpose -ne 'RestoreOrigin' }).Count -eq 0) -and (($usedDest -join ',') -ceq 'Den-Go-Controller.yml,LilyPad.ini') -and (($usedPaths -join '|') -ceq ($expectedPaths -join '|')) -and (@($back.UninstallBackups).Count -eq 1)) "Removed=$($back.Counts.Removed) Restored=$($back.Counts.Restored) UsedBackups=$(@($back.UsedBackups).Count) for [$($usedDest -join ',')]")
     [void](Assert-I2A 'UC7-unused-backups-recorded' (@($back.UnusedBackups | Where-Object { $_.Reason -eq 'NotOrigin' }).Count -ge 1) 'the migrated bridge''s update backup is listed as unused')
     [void](Assert-I2A 'UC7-clean-run-has-no-manual-check' (($back.ManualCheckRequired -eq $false) -and (@($back.ResidualFiles).Count -eq 0)) 'no residual, no manual check')
     [void](Assert-I2A 'UC7-closed-records-carried-as-history' (@($back.ClosedRecords).Count -eq @((DgU-AsList (DgProp (Get-I2CIs $L) 'ClosedRecords' @()))).Count) 'ClosedRecords are copied, not applied')
@@ -490,14 +502,19 @@ try {
     $planG = [pscustomobject]@{ Generation = $g2; FileDecisions = $plan.FileDecisions; ShortcutDecisions = $plan.ShortcutDecisions; Archive = $plan.Archive; Blocking = @(); ArchiveCollision = ''; DeferredRecords = @(); IncludeInputProfiles = $true; ProductVersion = '2.0.0' }
     $stateG = New-DenGoUninstalledState $planG $prev $us0 $ctxFake $now $P
     [void](Assert-I2A 'UC7-contamination-evidence-recorded' (($stateG.ClosedGeneration.ContaminationSuspect -eq $true) -and (@($stateG.ClosedGeneration.ContaminationReasons).Count -eq 1) -and ($stateG.ManualCheckRequired -eq $true) -and (@($stateG.ManualCheckReasons) -contains 'ContaminationSuspect')) 'the grounds for the suspicion are recorded')
-    # deferred records
-    $stP = Cl (Get-I2CIs $L); $pcsx = New-I2CRecord 'PCSX2' 'InputProfile' (Join-Path $L.Pcsx2Inis 'DenGo-Controller-Converter.lily') 'ReplacedExisting' ('66' * 32) ('77' * 32) '' $true
+    # deferred records (I3-D follow-up). I3 does not defer PCSX2 any more: a PCSX2 record in an I3 generation is planned like every other record and the new state has NO DeferredRecords.
+    # What stays: the DeferredRecords that an I2-C generation already wrote are carried verbatim when the uninstall is reconfirmed (they are never promoted, applied or closed).
+    $stP = Cl (Get-I2CIs $L); $pcsx = Cl (Get-I2CRecord (Get-I2CIs $L) 'DenGo-Controller-Converter.lily' 'PCSX2')
     $stP.Files = [object[]]@($pcsx)
     $prevP = [pscustomobject]@{ Exists = $true; Sha = $prev.Sha; State = $stP; Files = [object[]]@($pcsx) }
     $planP = Get-DenGoUninstallPlan $P $prevP $us0 (Get-I2COptions $true)
     $stateP = New-DenGoUninstalledState $planP $prevP $us0 $ctxFake $now $P
-    [void](Assert-I2A 'UC7-deferred-records-kept-for-i3' ((@($stateP.DeferredRecords).Count -eq 1) -and ($stateP.DeferredRecords[0].Reason -eq 'DeferredToI3') -and ($stateP.DeferredRecords[0].Record.Platform -eq 'PCSX2') -and ($stateP.Counts.Deferred -eq 1) -and (@($stateP.ClosedRecords).Count -eq 0) -and (@($stateP.ResidualFiles | Where-Object { $_.Disposition -eq 'Deferred' }).Count -eq 1)) 'verbatim record, not in ClosedRecords, counted, listed as residual')
-    [void](Assert-I2A 'UC7-deferred-records-never-block' ((@($planP.Blocking).Count -eq 0)) 'a PCSX2 record alone does not fail the uninstall')
+    $pcsxItems = @($stateP.Items | Where-Object { $_.Platform -eq 'PCSX2' })
+    [void](Assert-I2A 'UC7-deferred-records-kept-for-i3' ((@($stateP.DeferredRecords).Count -eq 0) -and ($stateP.Counts.Deferred -eq 0) -and (@($stateP.ClosedRecords).Count -eq 0) -and (@($stateP.ResidualFiles | Where-Object { $_.Disposition -eq 'Deferred' }).Count -eq 0) -and ($pcsxItems.Count -eq 1) -and ($pcsxItems[0].Decision -eq 'Remove')) 'an I3 generation: the PCSX2 record is an ordinary Remove item, DeferredRecords is empty, nothing is closed')
+    $oldDeferred = [object[]]@([pscustomobject][ordered]@{ Record = (Cl $pcsx); Reason = 'DeferredToI3' })
+    $usOld = [pscustomobject]@{ UninstalledAt = '2026-01-01T00:00:00.0000000+09:00'; UninstallTransactionId = 'T-OLD'; State = [pscustomobject][ordered]@{ SchemaVersion = 1; StateRevision = 2; State = 'Uninstalled'; UninstalledAt = '2026-01-01T00:00:00.0000000+09:00'; UninstallTransactionId = 'T-OLD'; DeferredRecords = $oldDeferred; ClosedRecords = [object[]]@() } }
+    $reconf = New-DenGoReconfirmedState $usOld @{ US = [pscustomobject]@{ Path = 'C:\h\uninstalled-state.json'; Sha = ('CD' * 32) } } @{ TxnId = 'T-NEW' } $now
+    [void](Assert-I2A 'UC7-deferred-records-never-block' (((ConvertTo-Json -InputObject @($reconf.DeferredRecords) -Depth 9) -ceq (ConvertTo-Json -InputObject @($oldDeferred) -Depth 9)) -and (@($reconf.ClosedRecords).Count -eq 0) -and ($reconf.Reconfirmation.Reconfirmed -eq $true) -and (@($planP.Blocking).Count -eq 0)) 'a closed I2-C generation keeps its DeferredRecords verbatim through a reconfirmation (no promotion, no close); a PCSX2 record alone does not block the plan')
 
     # =================================================== UC8 AlreadyUninstalled
     $r = Invoke-I2CUninstall $L

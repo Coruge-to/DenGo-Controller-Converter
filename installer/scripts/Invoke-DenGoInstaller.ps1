@@ -18,6 +18,7 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2.0
 . (Join-Path $PSScriptRoot 'DenGoInstallerTransaction.ps1')
 . (Join-Path $PSScriptRoot 'DenGoInstallerProductApply.ps1')
+. (Join-Path $PSScriptRoot 'DenGoUninstallerProductApply.ps1')   # functions only: Resolve-DenGoOriginBackup judges the Origin of an earlier PCSX2 record when the plan is made
 
 if ($DryRun -and $Apply) {
     throw 'Specify either -DryRun or -Apply, not both.'
@@ -276,7 +277,7 @@ function Resolve-DesktopShortcutPath {
 }
 function Get-RunningTargetProducts {
     $running = @(Get-CimInstance Win32_Process | Where-Object {
-        [string]::Equals([string]$_.Name,'BveTs.exe',[System.StringComparison]::OrdinalIgnoreCase) -or [string]::Equals([string]$_.Name,'rpcs3.exe',[System.StringComparison]::OrdinalIgnoreCase) -or [string]::Equals([string]$_.Name,'DenGoControllerConverter.exe',[System.StringComparison]::OrdinalIgnoreCase) -or [string]::Equals([string]$_.Name,'pcsx2-qt.exe',[System.StringComparison]::OrdinalIgnoreCase) -or [string]::Equals([string]$_.Name,'pcsx2.exe',[System.StringComparison]::OrdinalIgnoreCase)
+        [string]::Equals([string]$_.Name,'BveTs.exe',[System.StringComparison]::OrdinalIgnoreCase) -or [string]::Equals([string]$_.Name,'rpcs3.exe',[System.StringComparison]::OrdinalIgnoreCase) -or [string]::Equals([string]$_.Name,'DenGoControllerConverter.exe',[System.StringComparison]::OrdinalIgnoreCase) -or ([string]$_.Name -match '(?i)\Apcsx2[^\\/]*[.]exe\z')
     })
     $products = New-Object System.Collections.ArrayList
     foreach ($process in $running) {
@@ -482,7 +483,9 @@ if (@($exactPCSX2Candidates).Count -gt 0) {
         -not [string]::Equals([string]$_.Platform,'PCSX2',[System.StringComparison]::Ordinal) -or
         $exactPCSX2Names -contains [System.IO.Path]::GetFileName([string]$_.Executable)
     })
-}$detected = New-Object System.Collections.ArrayList
+}
+$pcsx2Group = Group-DenGoPcsx2Candidates -Candidates ([object[]]@($candidates | Where-Object { [string]::Equals([string]$_.Platform,'PCSX2',[System.StringComparison]::Ordinal) }))
+$detected = New-Object System.Collections.ArrayList
 foreach ($candidate in $candidates) {
     $exeDirectory = [System.IO.Path]::GetDirectoryName([string]$candidate.Executable)
     $state = 'Detected'
@@ -490,41 +493,40 @@ foreach ($candidate in $candidates) {
     $inputDevices = ''
     $profileDirectory = ''
     $effectiveInputProfile = ''
+    $pcsx2Status = ''
+    $pcsx2Identity = $null
     if ([string]::Equals([string]$candidate.Platform,'BVE',[System.StringComparison]::Ordinal)) {
         $architecture = Get-PeMachine ([string]$candidate.Executable)
         $mode = if ([string]::Equals($architecture,'x86',[System.StringComparison]::Ordinal)) { 'BVE5' } elseif ([string]::Equals($architecture,'x64',[System.StringComparison]::Ordinal)) { 'BVE6' } else { 'Ambiguous' }
         if ([string]::Equals($mode,'Ambiguous',[System.StringComparison]::Ordinal)) { $state='Ambiguous' }
         $inputDevices = Join-Path $exeDirectory 'Input Devices'
     } elseif ([string]::Equals([string]$candidate.Platform,'PCSX2',[System.StringComparison]::Ordinal)) {
-        $portable = [System.IO.File]::Exists((Join-Path $exeDirectory 'portable.ini')) -or [System.IO.File]::Exists((Join-Path $exeDirectory 'portable.txt')) -or (([string]$candidate.Arguments) -match '(?i)(?:\A|\s)-portable(?:\s|\z)')
-        $mode = if ($portable) { 'Portable' } else { 'CentralConfiguration' }
-        $configurationRoot = if ($portable) { $exeDirectory } else { Join-Path ([System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::MyDocuments)) 'PCSX2' }
-        $legacyIni = Join-Path $configurationRoot 'inis\LilyPad.ini'
-        $effectiveInputProfile = $legacyIni
-        $currentIni = Join-Path $configurationRoot 'inis\PCSX2.ini'
-        if ([System.IO.File]::Exists($legacyIni)) {
-            $mode = $mode + '-LegacyLilyPad'
-            $profileDirectory=Join-Path $configurationRoot 'inis'
-        } elseif ([System.IO.File]::Exists($currentIni)) {
-            $currentText = [System.IO.File]::ReadAllText($currentIni,[System.Text.Encoding]::UTF8)
-            if ($currentText.IndexOf('[InputSources]',[System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and $currentText.IndexOf('[Pad]',[System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and $currentText.IndexOf('[Pad1]',[System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
-                $mode = $mode + '-CurrentIntegrated'
-                $profileDirectory = $currentIni
-            } else { $state='DetectedButNotInitialized' }
-        } else { $state='DetectedButNotInitialized' }
+        $pcsx2Entry = $null
+        foreach ($groupEntry in @($pcsx2Group.Detected)) {
+            if ([string]::Equals([string]$groupEntry.Executable,[System.IO.Path]::GetFullPath([string]$candidate.Executable),[System.StringComparison]::OrdinalIgnoreCase)) { $pcsx2Entry = $groupEntry }
+        }
+        if ($null -ne $pcsx2Entry) {
+            $state = [string]$pcsx2Entry.State
+            $mode = [string]$pcsx2Entry.Mode
+            $profileDirectory = [string]$pcsx2Entry.ProfileDirectory
+            $effectiveInputProfile = [string]$pcsx2Entry.EffectiveInputProfile
+            $pcsx2Status = [string]$pcsx2Entry.SupportStatus
+            $pcsx2Identity = $pcsx2Entry.Identity
+        } else { $state = 'DetectedButNotInitialized' }
     } elseif ([string]::Equals([string]$candidate.Platform,'RPCS3',[System.StringComparison]::Ordinal)) {
         $mode='ExecutableRelativeConfig'
         $profileDirectory=Join-Path $exeDirectory 'config\input_configs\global'
         if (-not [System.IO.Directory]::Exists($profileDirectory)) { $state='DetectedButNotInitialized' }
     }
-    $supportStatus = if ([string]::Equals([string]$candidate.Platform,'PCSX2',[System.StringComparison]::Ordinal) -and $mode.IndexOf('CurrentIntegrated',[System.StringComparison]::Ordinal) -ge 0) { 'UnsupportedCurrent' } elseif ([string]::Equals([string]$candidate.Platform,'PCSX2',[System.StringComparison]::Ordinal) -and $mode.IndexOf('LegacyLilyPad',[System.StringComparison]::Ordinal) -ge 0 -and [string]::Equals($state,'Detected',[System.StringComparison]::Ordinal)) { 'Supported' } else { '' }
-    [void]$detected.Add([pscustomobject]@{Platform=$candidate.Platform;Executable=$candidate.Executable;State=$state;Mode=$mode;SupportStatus=$supportStatus;InputDevices=$inputDevices;ProfileDirectory=$profileDirectory;EffectiveInputProfile=$effectiveInputProfile;DetectionSource=$candidate.Source})
+    $supportStatus = if ([string]::Equals([string]$candidate.Platform,'PCSX2',[System.StringComparison]::Ordinal)) { $pcsx2Status } else { '' }
+    $detectedRow = [pscustomobject]@{Platform=$candidate.Platform;Executable=$candidate.Executable;State=$state;Mode=$mode;SupportStatus=$supportStatus;InputDevices=$inputDevices;ProfileDirectory=$profileDirectory;EffectiveInputProfile=$effectiveInputProfile;DetectionSource=$candidate.Source}
+    if ([string]::Equals([string]$candidate.Platform,'PCSX2',[System.StringComparison]::Ordinal)) { Add-Member -InputObject $detectedRow -NotePropertyName Identity -NotePropertyValue $pcsx2Identity }
+    [void]$detected.Add($detectedRow)
 }
 
 foreach ($steamProduct in @(Get-SteamUrlProducts)) { [void]$detected.Add([pscustomobject]@{Platform=$steamProduct.Platform;Executable=$steamProduct.Executable;State=$steamProduct.State;Mode=$steamProduct.Mode;InputDevices='';ProfileDirectory='';DetectionSource=$steamProduct.DetectionSource}) }
 $bve = @($detected | Where-Object { [string]::Equals([string]$_.Platform,'BVE',[System.StringComparison]::Ordinal) -and [string]::Equals([string]$_.State,'Detected',[System.StringComparison]::Ordinal) })
 $pcsx2 = @($detected | Where-Object { [string]::Equals([string]$_.Platform,'PCSX2',[System.StringComparison]::Ordinal) -and [string]::Equals([string]$_.State,'Detected',[System.StringComparison]::Ordinal) })
-$supportedPcsx2 = @($pcsx2 | Where-Object { ([string]$_.Mode).IndexOf('LegacyLilyPad',[System.StringComparison]::Ordinal) -ge 0 })
 $rpcs3 = @($detected | Where-Object { [string]::Equals([string]$_.Platform,'RPCS3',[System.StringComparison]::Ordinal) -and [string]::Equals([string]$_.State,'Detected',[System.StringComparison]::Ordinal) })
 
 $plan = New-Object System.Collections.ArrayList
@@ -545,18 +547,25 @@ if (-not [bool]$SkipBveIntegration) {
         [void]$plan.Add((New-PlanItem 'AtsEX Legacy' 'VehicleSpec' $sources.LegacyVehicleSpec (Join-Path $legacyDir 'DenGoAtsExLegacyVehicleSpec.dll') $false $false))
     }
 }
-if (@($supportedPcsx2).Count -eq 1) {
-    $dedicatedProfileName = 'DenGo-Controller-Converter.lily'
-    $legacyIniPath = [string]$supportedPcsx2[0].EffectiveInputProfile
-    $activeProfileSource = Join-Path ([System.IO.Path]::GetDirectoryName($sources.PCSX2Profile)) 'DenGo-LilyPad-Active.ini'
-    [void]$plan.Add((New-PlanItem 'PCSX2' 'InputProfile' $sources.PCSX2Profile (Join-Path ([string]$supportedPcsx2[0].ProfileDirectory) $dedicatedProfileName) $true $false))
-    [void]$plan.Add((New-PlanItem 'PCSX2' 'EffectiveInputProfile' $activeProfileSource $legacyIniPath $true $false))
+$pcsx2PlanLayout = $null
+$pcsx2Previous = $null
+$pcsx2LastClosedTransactionId = ''
+if ([string]::Equals([string]$pcsx2Group.Status,'Resolved',[System.StringComparison]::Ordinal)) {
+    # read only. An unreadable state only means "no earlier record" for the preview: the Apply step reads it again and stops before it writes anything.
+    try {
+        $planBackupRoot = ''
+        if (-not [string]::IsNullOrWhiteSpace($BackupRootOverride)) { $planBackupRoot = [System.IO.Path]::GetFullPath($BackupRootOverride) }
+        $pcsx2PlanLayout = Get-DenGoProductLayout -LocalAppData $env:LOCALAPPDATA -PublicRoot 'C:\Users\Public' -ShortcutPath '' -BackupRoot $planBackupRoot
+        $pcsx2Previous = Read-DenGoPreviousState $pcsx2PlanLayout
+        $pcsx2LastClosedTransactionId = [string](Read-DenGoUninstalledState $pcsx2PlanLayout).LastClosedTransactionId
+    } catch { $pcsx2Previous = $null }
 }
+$pcsx2PlanItems = New-DenGoPcsx2PlanItems -Resolution $pcsx2Group -LilySource $sources.PCSX2Profile -ActiveSource (Join-Path ([System.IO.Path]::GetDirectoryName($sources.PCSX2Profile)) 'DenGo-LilyPad-Active.ini') -ReplaceConsent ([bool]$ReplaceModifiedPCSX2Profile) -Previous $pcsx2Previous -Layout $pcsx2PlanLayout -LastClosedTransactionId $pcsx2LastClosedTransactionId
+foreach ($pcsx2Item in @($pcsx2PlanItems)) { [void]$plan.Add($pcsx2Item) }
 if (@($rpcs3).Count -eq 1) { [void]$plan.Add((New-PlanItem 'RPCS3' 'InputProfile' $sources.RPCS3Profile (Join-Path ([string]$rpcs3[0].ProfileDirectory) 'Den-Go-Controller.yml') $false $true)) }
 
 foreach ($item in @($plan)) {
     if ([string]::Equals([string]$item.Action,'PreserveUserModified',[System.StringComparison]::Ordinal)) {
-        if ([string]::Equals([string]$item.Platform,'PCSX2',[System.StringComparison]::Ordinal) -and $ReplaceModifiedPCSX2Profile) { $item.Action = 'UpdateOrRepair' }
         if ([string]::Equals([string]$item.Platform,'RPCS3',[System.StringComparison]::Ordinal) -and $ReplaceModifiedRPCS3Profile) { $item.Action = 'UpdateOrRepair' }
     }
 }
@@ -567,9 +576,9 @@ $shortcutCreated = $false
 $shortcutPath = ''
 $shortcutError = ''
 $succeeded=$true;$errorCode='';$errorMessage='';$failedSet='';$rollbackAttempted=$false;$rollbackSucceeded=$true;$rollbackError=''
-$transactionInfo = $null;$recoveryInfo = $null;$deferredItems = [object[]]@()
+$transactionInfo = $null;$recoveryInfo = $null;$deferredItems = [object[]]@();$closedGenerationPcsx2Origins = [object[]]@()
 if ($Apply -and $RealSystem) {
-    # I2-B: one all-or-nothing transaction for every Set (see DenGoInstallerProductApply.ps1). PCSX2 / LilyPad stay out until I3.
+    # I2-B: one all-or-nothing transaction for every Set (see DenGoInstallerProductApply.ps1). I3: PCSX2 1.6.0 / LilyPad is a Set of it (two fixed leaves).
     $resolvedShortcutPath = '';$shortcutResolveError = ''
     if ($CreateDesktopShortcut) { try { $resolvedShortcutPath = Resolve-DesktopShortcutPath $ShortcutPathOverride } catch { $shortcutResolveError = [string]$_.Exception.Message } }
     $backupBaseOverride = ''
@@ -590,6 +599,7 @@ if ($Apply -and $RealSystem) {
     $transactionInfo = [pscustomobject]@{TransactionId=[string]$productResult.TransactionId;Code=[string]$productResult.TransactionCode;RollbackState=[string]$productResult.RollbackState;ManualCheckRequired=[bool]$productResult.ManualCheckRequired;Reasons=[object[]]@($productResult.Reasons);ReportPath=[string]$productResult.ReportPath;LockAcquired=[bool]$productResult.LockAcquired;StateCommitted=[bool]$productResult.StateCommitted;RecoveryOutcome=[string]$productResult.RecoveryOutcome;FailedItem=[int]$productResult.FailedItem}
     $recoveryInfo = $productResult.Recovery
     $deferredItems = [object[]]@($productResult.DeferredItems)
+    $closedGenerationPcsx2Origins = [object[]]@($productResult.ClosedGenerationPcsx2Origins)
 } elseif ($Apply) {
     $applyResults = Invoke-SandboxApply ([object[]]@($plan)) $TestRoot
 } elseif ($DryRun) {
@@ -601,7 +611,7 @@ if ($Apply -and $RealSystem) {
         $recoveryInfo = [pscustomobject]@{Proceed=$true;Outcome='Unknown';ErrorCode='';Detail=[string]$_.Exception.Message;Reasons=[object[]]@();Region='';TransactionId='';ReportPath='';ManualCheckRequired=$false}
     }
 }
-$result=[pscustomobject]@{SchemaVersion=9;Generated=[System.DateTimeOffset]::Now.ToString('o');InterruptedInstallDetected=$interruptedInstallDetected;Succeeded=$succeeded;ErrorCode=$errorCode;ErrorMessage=$errorMessage;FailedSet=$failedSet;RollbackAttempted=$rollbackAttempted;RollbackSucceeded=$rollbackSucceeded;RollbackError=$rollbackError;ShortcutRequested=$shortcutRequested;ShortcutCreated=$shortcutCreated;ShortcutPath=$shortcutPath;ShortcutError=$shortcutError;DryRun=[bool]$DryRun;Apply=[bool]$Apply;RealSystem=[bool]$RealSystem;AdditionalSearch=[bool]$AdditionalSearch;BveExCurrentInstalled=[bool]$bveExCurrentInstalled;BveExLegacyInstalled=[bool]$bveExLegacyInstalled;BveIntegrationSkipped=[bool]$SkipBveIntegration;TestRoot=$TestRoot;OutputRoot=$outputRoot;BackupRoot=$backupRoot;ReplacementDecisions=[pscustomobject]@{PCSX2=[bool]$ReplaceModifiedPCSX2Profile;RPCS3=[bool]$ReplaceModifiedRPCS3Profile};Detected=[object[]]@($detected);Plan=[object[]]@($plan);ApplyResults=[object[]]@($applyResults);Transaction=$transactionInfo;Recovery=$recoveryInfo;DeferredItems=[object[]]@($deferredItems)}
+$result=[pscustomobject]@{SchemaVersion=9;Generated=[System.DateTimeOffset]::Now.ToString('o');InterruptedInstallDetected=$interruptedInstallDetected;Succeeded=$succeeded;ErrorCode=$errorCode;ErrorMessage=$errorMessage;FailedSet=$failedSet;RollbackAttempted=$rollbackAttempted;RollbackSucceeded=$rollbackSucceeded;RollbackError=$rollbackError;ShortcutRequested=$shortcutRequested;ShortcutCreated=$shortcutCreated;ShortcutPath=$shortcutPath;ShortcutError=$shortcutError;DryRun=[bool]$DryRun;Apply=[bool]$Apply;RealSystem=[bool]$RealSystem;AdditionalSearch=[bool]$AdditionalSearch;BveExCurrentInstalled=[bool]$bveExCurrentInstalled;BveExLegacyInstalled=[bool]$bveExLegacyInstalled;BveIntegrationSkipped=[bool]$SkipBveIntegration;TestRoot=$TestRoot;OutputRoot=$outputRoot;BackupRoot=$backupRoot;ReplacementDecisions=[pscustomobject]@{PCSX2=[bool]$ReplaceModifiedPCSX2Profile;RPCS3=[bool]$ReplaceModifiedRPCS3Profile};Detected=[object[]]@($detected);Plan=[object[]]@($plan);ApplyResults=[object[]]@($applyResults);Transaction=$transactionInfo;Recovery=$recoveryInfo;DeferredItems=[object[]]@($deferredItems);Pcsx2Resolution=[pscustomobject]@{Status=[string]$pcsx2Group.Status;SelectedRoot=[string]$pcsx2Group.SelectedRoot;Roots=[string[]]@($pcsx2Group.Roots)};ClosedGenerationPcsx2Origins=[object[]]@($closedGenerationPcsx2Origins)}
 [System.IO.File]::WriteAllText($jsonOutput,($result | ConvertTo-Json -Depth 9),(New-Object System.Text.UTF8Encoding($true)))
 $lines=New-Object System.Collections.ArrayList
 [void]$lines.Add('DenGo installer formal preview plan')

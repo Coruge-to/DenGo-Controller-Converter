@@ -9,12 +9,15 @@
 #     with no change; the reason is kept in the message. An abandoned mutex counts as acquired and is never evidence of an interruption.
 #   - Order: lock -> process gate A -> recovery gate -> previous-state read -> shortcut staging -> plan conversion -> leaf gate -> freshness -> Begin -> Apply -> Commit.
 #   - Every destination is registered in the journal by DgTx-Begin before anything is changed; the product leaf gate allows only fixed leaves.
-#   - PCSX2 / LilyPad items are never part of the transaction (Deferred until I3); they are reported as Action='Deferred'.
+#   - PCSX2 1.6.0 / LilyPad (I3): the real role Pcsx2 writes exactly two fixed leaves below <settings root>\inis (LilyPad.ini, DenGo-Controller-Converter.lily);
+#     an exe that is not proven to be 1.6.0 (name + x86 + exe SHA-256 + Plugins\LilyPad.dll SHA-256, as one allow-list pair) is never planned and no settings file of it is opened.
+#     LilyPad.ini is replaced only with explicit consent (PreserveUserModified otherwise), with the content right before the replacement kept as the Origin.
+#     A PCSX2 record is never moved to ClosedRecords.
 #   - An old-format installing.json is never converted or deleted: LegacyMarkerUnsupported (RepairRequired).
 #   - The ownership merge only adds fields (SchemaVersion stays 1); records that were not part of this plan are carried forward.
 
 function Get-DenGoLockName { return 'Global\DenGoControllerConverter.Transaction' }   # I2-D contract: one machine-wide name for Install and Uninstall (the setup wrapper uses the same name and DACL)
-function DgP-SetOrder { return @('Core','BVE5','BVE6','BveEX Current','AtsEX Legacy','RPCS3','Shortcut') }
+function DgP-SetOrder { return @('Core','BVE5','BVE6','BveEX Current','AtsEX Legacy','RPCS3','PCSX2','Shortcut') }
 function DgP-ShortcutFileName { return 'DenGo Controller Converter.lnk' }
 function DgP-DefaultTxnIdPattern { return '^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$' }
 
@@ -92,6 +95,7 @@ function DgP-PeMachine {
     $m = [System.BitConverter]::ToUInt16($b,$off + 4)
     if ($m -eq 0x014C) { return 'x86' }
     if ($m -eq 0x8664) { return 'x64' }
+    if ($m -eq 0xAA64) { return 'arm64' }
     return 'Other'
 }
 
@@ -134,6 +138,18 @@ function Get-DenGoRoleSpec {
         if ([string]::IsNullOrEmpty($x) -or -not (DgFs-Exists (DgP-Join $x 'rpcs3.exe'))) { $spec.Reason = 'Rpcs3RootHasNoExe'; return $spec }
         if (-not (DgFs-DirExists $g)) { $spec.Reason = 'Rpcs3RootMissing'; return $spec }
         $spec.PolicyRoot = $g; $spec.Dests = [string[]]@((DgP-Join $g 'Den-Go-Controller.yml')); $spec.Ok = $true
+        return $spec
+    }
+    if (DgEq $Role 'Pcsx2') {
+        # PCSX2 1.6.0 settings folder: the root is <settings root>\inis and nothing else. Two fixed leaves, no folder to create.
+        # Only the structure is proven here (a folder named inis, no link); PCSX2_ui.ini is NOT required, so a recovery or an uninstall never stops for it.
+        $c = DgPath-Check $Root
+        if (-not $c.Ok) { $spec.Reason = 'RootInvalid'; return $spec }
+        $i = DgP-Full $c.Normalized
+        if (-not (DgEqI ([System.IO.Path]::GetFileName($i)) 'inis')) { $spec.Reason = 'Pcsx2RootInvalid'; return $spec }
+        if (-not (DgFs-DirExists $i)) { $spec.Reason = 'Pcsx2RootMissing'; return $spec }
+        if (DgP-IsReparsePoint $i) { $spec.Reason = 'Pcsx2RootReparse'; return $spec }
+        $spec.PolicyRoot = $i; $spec.Dests = [string[]]@((DgP-Join $i 'LilyPad.ini'),(DgP-Join $i 'DenGo-Controller-Converter.lily')); $spec.Ok = $true
         return $spec
     }
     if (DgEq $Role 'Shortcut') {
@@ -255,7 +271,7 @@ function DgP-MapPlatform {
     if (DgEq $Platform 'BveEX Current') { return @{ Role = 'Current'; Root = ''; Set = $Platform; Deferred = $false } }
     if (DgEq $Platform 'AtsEX Legacy') { return @{ Role = 'Legacy'; Root = ''; Set = $Platform; Deferred = $false } }
     if (DgEq $Platform 'RPCS3') { return @{ Role = 'Rpcs3'; Root = [System.IO.Path]::GetDirectoryName((DgP-Full $Destination)); Set = $Platform; Deferred = $false } }
-    if (DgEq $Platform 'PCSX2') { return @{ Role = 'Deferred'; Root = ''; Set = $Platform; Deferred = $true } }
+    if (DgEq $Platform 'PCSX2') { return @{ Role = 'Pcsx2'; Root = [System.IO.Path]::GetDirectoryName((DgP-Full $Destination)); Set = $Platform; Deferred = $false } }
     throw (DgError 'PlanInvalid' ('Unsupported platform in the plan: ' + $Platform))
 }
 function Convert-DenGoPlanToEntries {
@@ -264,7 +280,7 @@ function Convert-DenGoPlanToEntries {
     foreach ($p in @($Plan)) {
         $platform = [string]$p.Platform; $component = [string]$p.Component; $action = [string]$p.Action
         $dest = [string]$p.Destination
-        if (-not ((DgEq $action 'Add') -or (DgEq $action 'UpdateOrRepair') -or (DgEq $action 'Unchanged') -or (DgEq $action 'PreserveUserModified') -or (DgEq $action 'NotInitialized'))) { throw (DgError 'PlanInvalid' ('Unsupported Apply action: ' + $action)) }
+        if (-not ((DgEq $action 'Add') -or (DgEq $action 'UpdateOrRepair') -or (DgEq $action 'Unchanged') -or (DgEq $action 'PreserveUserModified') -or (DgEq $action 'NotInitialized') -or (DgEq $action 'PreserveOriginInvalid'))) { throw (DgError 'PlanInvalid' ('Unsupported Apply action: ' + $action)) }
         $m = DgP-MapPlatform $platform $dest
         $isWrite = ((DgEq $action 'Add') -or (DgEq $action 'UpdateOrRepair'))
         [void]$entries.Add([pscustomobject]@{
@@ -357,6 +373,254 @@ function Test-DenGoBeginMatchesPlan {
     if (-not (DgEq ([string]$Ctx.OldStateSha) ([string]$Previous.Sha))) { throw (DgError 'PlanStale' 'The installed state changed since it was read.') }
 }
 
+# ---------------------------------------------------------------- PCSX2 1.6.0 / LilyPad (I3)
+# Nothing in this block writes. An exe is classified by the exe itself, never by a settings file:
+#   name pcsx2.exe + PE x86 + exe SHA-256 + Plugins\LilyPad.dll SHA-256, the last two as ONE pair of the allow list (fail-closed).
+# Only a Supported160 exe makes this code touch the filesystem beyond the exe header: the order below stops at the first condition that fails.
+# Resolve-DenGoOriginBackup (the uninstall layer) judges an earlier Origin, so DenGoUninstallerProductApply.ps1 must be dot-sourced as well.
+function Get-DenGoDocumentsRoot { return [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::MyDocuments) }
+# The allow list is a constant of this file (no new runtime file). The pair below is the one measured on the owner's PCSX2 1.6.0;
+# it becomes the formal list only after it is compared with the official distribution. Any other build is Unverified: nothing is planned or written.
+function Get-DenGoPcsx2KnownPairs {
+    return ,@(
+        [pscustomobject]@{ ExeSha256 = 'E387C713005082A19DB33F4E163A7F48671C1F9EA06BFD76C6F120B246043E59'; LilyPadSha256 = '637DEF94C71ED72A9F04F1541FBFFE4AB63F866461157E80EE90672FC380ADA1' }
+    )
+}
+function Test-DenGoPcsx2ExeListed {
+    param([string]$ExeSha)
+    $pairs = Get-DenGoPcsx2KnownPairs   # assigned first: the list is returned as an array in an array so that one pair stays a pair
+    foreach ($p in $pairs) {
+        $e = [string](DgProp $p 'ExeSha256' ''); $l = [string](DgProp $p 'LilyPadSha256' '')
+        if (($e.Length -eq 0) -or ($l.Length -eq 0)) { continue }
+        if (DgEqI $e $ExeSha) { return $true }
+    }
+    return $false
+}
+function Test-DenGoPcsx2KnownPair {
+    param([string]$ExeSha,[string]$PluginSha)
+    $pairs = Get-DenGoPcsx2KnownPairs
+    foreach ($p in $pairs) {
+        $e = [string](DgProp $p 'ExeSha256' ''); $l = [string](DgProp $p 'LilyPadSha256' '')
+        if (($e.Length -eq 0) -or ($l.Length -eq 0)) { continue }
+        if ((DgEqI $e $ExeSha) -and (DgEqI $l $PluginSha)) { return $true }
+    }
+    return $false
+}
+# Class: Supported160 | Unsupported17Plus | Unverified. Never throws; the running processes do not matter.
+function Get-DenGoPcsx2Identity {
+    param([string]$ExePath)
+    $r = [pscustomobject]@{ Class = 'Unverified'; Reason = ''; Machine = ''; ExeSha256 = ''; PluginSha256 = ''; ExePath = $ExePath }
+    try {
+        $leaf = [System.IO.Path]::GetFileName($ExePath)
+        # (1) the Qt build is 1.7 or later by its name alone: no file is opened
+        if (DgEqI $leaf 'pcsx2-qt.exe') { $r.Class = 'Unsupported17Plus'; $r.Reason = 'QtExecutable'; return $r }
+        # (2) the PE header: x64 / arm64 is not 1.6.0 (its exe is not hashed, its folder is not opened)
+        $m = DgP-PeMachine $ExePath
+        $r.Machine = $m
+        if (($m -eq 'x64') -or ($m -eq 'arm64')) { $r.Class = 'Unsupported17Plus'; $r.Reason = ('Machine:' + $m); return $r }
+        if ($m -ne 'x86') { $r.Reason = ('PeNotX86:' + $m); return $r }
+        # (3) only the exact name pcsx2.exe can be 1.6.0 (a renamed build is Unverified)
+        if (-not (DgEqI $leaf 'pcsx2.exe')) { $r.Reason = 'NameNotPcsx2Exe'; return $r }
+        # (4) the exe itself must be on the list: otherwise nothing next to it is opened
+        $exeSha = DgFs-Sha256 $ExePath
+        $r.ExeSha256 = $exeSha
+        if (-not (Test-DenGoPcsx2ExeListed $exeSha)) { $r.Reason = 'ExeShaNotListed'; return $r }
+        # (5) the LilyPad plugin beside it must be the one of the SAME pair
+        $plugin = [System.IO.Path]::Combine([System.IO.Path]::GetDirectoryName($ExePath), 'Plugins\LilyPad.dll')
+        if (-not (DgFs-Exists $plugin)) { $r.Reason = 'LilyPadDllMissing'; return $r }
+        $pluginSha = DgFs-Sha256 $plugin
+        $r.PluginSha256 = $pluginSha
+        if (-not (Test-DenGoPcsx2KnownPair $exeSha $pluginSha)) { $r.Reason = 'PairNotListed'; return $r }
+        $r.Class = 'Supported160'
+    } catch {
+        $r.Class = 'Unverified'; $r.Reason = 'IdentityUnreadable'
+    }
+    return $r
+}
+# portable.ini beside the exe, or -portable on the command line, makes the exe folder the settings root; nothing else does (portable.txt is never looked at).
+function Resolve-DenGoPcsx2Root {
+    param([string]$ExePath,[string]$Arguments = '')
+    $dir = [System.IO.Path]::GetDirectoryName((DgP-Full $ExePath))
+    $portable = $false
+    if (DgFs-Exists (DgP-Join $dir 'portable.ini')) { $portable = $true }
+    elseif (([string]$Arguments) -match '(?i)(?:\A|\s)-portable(?:\s|\z)') { $portable = $true }
+    if ($portable) { return [pscustomobject]@{ Portable = $true; Root = $dir; Mode = 'Portable' } }
+    return [pscustomobject]@{ Portable = $false; Root = (DgP-Join (Get-DenGoDocumentsRoot) 'PCSX2'); Mode = 'CentralConfiguration' }
+}
+# Reads only; creates nothing. A root that cannot be proven is never written (README: the folder and LilyPad.ini are not created).
+function Test-DenGoPcsx2RootProof {
+    param([string]$Root)
+    $inis = DgP-Join $Root 'inis'
+    $r = [pscustomobject]@{ Ok = $false; Reason = ''; InisDir = $inis; LilyPadIni = (DgP-Join $inis 'LilyPad.ini'); LilyFile = (DgP-Join $inis 'DenGo-Controller-Converter.lily') }
+    if (-not (DgFs-DirExists $inis)) { $r.Reason = 'InisMissing'; return $r }
+    if (DgP-IsReparsePoint $inis) { $r.Reason = 'InisReparse'; return $r }
+    if (-not (DgFs-Exists (DgP-Join $inis 'PCSX2_ui.ini'))) { $r.Reason = 'UiIniMissing'; return $r }
+    if (-not (DgFs-Exists (DgP-Join $inis 'LilyPad.ini'))) { $r.Reason = 'LilyPadIniMissing'; return $r }
+    $r.Ok = $true
+    return $r
+}
+# Candidates -> one entry per exe (a settings root is shared by several exe files) and a decision: None | Resolved | Ambiguous.
+# Two or more proven roots are never resolved by source, order or running state: Ambiguous, nothing is planned.
+function Group-DenGoPcsx2Candidates {
+    param([object[]]$Candidates)
+    $detected = New-Object System.Collections.ArrayList
+    $seen = @{}
+    $roots = New-Object System.Collections.ArrayList
+    $readFailed = New-Object System.Collections.ArrayList   # a read that failed is kept here: it is never the same as "no candidate"
+    foreach ($c in @($Candidates)) {
+        $exe = ''
+        try { $exe = DgP-Full ([string](DgProp $c 'Executable' '')) } catch { continue }
+        $key = $exe.ToUpperInvariant()
+        if ($seen.ContainsKey($key)) { continue }
+        $seen[$key] = $true
+        $id = Get-DenGoPcsx2Identity $exe
+        if (($id.Reason -ceq 'IdentityUnreadable') -or ($id.Reason -ceq 'PeNotX86:Unreadable')) { [void]$readFailed.Add($exe + ' | ' + [string]$id.Reason) }
+        $args1 = [string](DgProp $c 'Arguments' '')
+        $e = [pscustomobject][ordered]@{ Platform = 'PCSX2'; Executable = $exe; Source = [string](DgProp $c 'Source' ''); Arguments = $args1; State = 'Detected'; Mode = ''; SupportStatus = ''; Identity = $id; ConfigRoot = ''; ProfileDirectory = ''; EffectiveInputProfile = '' }
+        if ($id.Class -eq 'Unsupported17Plus') { $e.SupportStatus = 'UnsupportedCurrent' }
+        elseif ($id.Class -eq 'Unverified') { $e.SupportStatus = 'UnsupportedUnverified' }
+        else {
+            try {
+                $rt = Resolve-DenGoPcsx2Root $exe $args1
+                $pf = Test-DenGoPcsx2RootProof $rt.Root
+                $e.ConfigRoot = $rt.Root
+                if ($pf.Ok) {
+                    $e.Mode = ($rt.Mode + '-LegacyLilyPad'); $e.SupportStatus = 'Supported'; $e.ProfileDirectory = $pf.InisDir; $e.EffectiveInputProfile = $pf.LilyPadIni
+                    $have = $false
+                    foreach ($x in $roots) { if (DgP-PathEq $x $rt.Root) { $have = $true } }
+                    if (-not $have) { [void]$roots.Add($rt.Root) }
+                } else { $e.State = 'DetectedButNotInitialized' }
+            } catch { $e.State = 'DetectedButNotInitialized'; [void]$readFailed.Add($exe + ' | RootUnreadable') }
+        }
+        [void]$detected.Add($e)
+    }
+    $status = 'None'; $selected = ''
+    # One proven root is resolved only when every candidate could be read: a failed read may hide a second root, so the remaining root is not chosen alone (nothing is planned).
+    if (($roots.Count -eq 1) -and ($readFailed.Count -eq 0)) { $status = 'Resolved'; $selected = [string]$roots[0] }
+    elseif (($roots.Count -ge 2) -or (($roots.Count -eq 1) -and ($readFailed.Count -gt 0))) {
+        $status = 'Ambiguous'
+        foreach ($e in $detected) { if ($e.SupportStatus -eq 'Supported') { $e.SupportStatus = 'Ambiguous' } }
+    }
+    return [pscustomobject]@{ Status = $status; SelectedRoot = $selected; Roots = [string[]]@($roots); Detected = [object[]]@($detected); Reason = $(if ($readFailed.Count -gt 0) { 'CandidateReadFailed: ' + [string]::Join('; ',[string[]]@($readFailed)) } else { '' }) }
+}
+# A PCSX2 record is told by the platform name alone: it is never closed (README: a platform that is not found now is not cleaned up).
+function DgP-IsPcsx2Record {
+    param([object]$Record)
+    return (DgEq ([string](DgProp $Record 'Platform' '')) 'PCSX2')
+}
+function DgP-Pcsx2KnownOwnership { return @('CreatedByInstaller','MigratedMatchingDenGoFile','ReplacedExisting','PreservedUserFile','NotInstalled','NotManaged') }
+function DgP-IsNonOwningOwnership { param([string]$Ownership) return ((DgEq $Ownership 'PreservedUserFile') -or (DgEq $Ownership 'NotInstalled') -or (DgEq $Ownership 'NotManaged')) }
+# Read only: is the Origin of an earlier ReplacedExisting record still usable (R1..R7 of the uninstall layer)? Anything unclear is "not usable" (fail-closed).
+function Test-DenGoPcsx2PreviousOrigin {
+    param([object]$Layout,[object]$Record,[string]$LastClosedTransactionId)
+    if ($null -eq $Layout) { return $false }
+    try {
+        $o = Resolve-DenGoOriginBackup $Layout ([bool](DgProp $Record 'ExistedBefore' $false)) ([string](DgProp $Record 'BeforeSHA256' '')) ([string](DgProp $Record 'Backup' '')) (DgProp $Record 'Backups' @()) $false $LastClosedTransactionId
+        return [bool]$o.Ok
+    } catch { return $false }
+}
+# The plan of the two fixed leaves of ONE resolved settings root (InputProfile first, then LilyPad.ini). Reads only.
+#   absent -> Add | equal to the DenGo source -> Unchanged
+#   different, the Origin of an earlier ReplacedExisting record is unusable -> PreserveOriginInvalid (written never, consent or not)
+#   different, an earlier DenGo-owned record whose AfterSHA256 is the current file (a DenGo version update) -> UpdateOrRepair
+#   different otherwise (first sighting, edited) -> UpdateOrRepair only with explicit consent, else PreserveUserModified
+function New-DenGoPcsx2PlanItems {
+    param([object]$Resolution,[string]$LilySource,[string]$ActiveSource,[bool]$ReplaceConsent,[object]$Previous = $null,[object]$Layout = $null,[string]$LastClosedTransactionId = '')
+    $items = New-Object System.Collections.ArrayList
+    if ($null -eq $Resolution -or -not (DgEq ([string](DgProp $Resolution 'Status' '')) 'Resolved')) { return ,[object[]]@() }
+    $inis = DgP-Join ([string]$Resolution.SelectedRoot) 'inis'
+    $targets = @(@('InputProfile',(DgP-Join $inis 'DenGo-Controller-Converter.lily'),$LilySource),@('EffectiveInputProfile',(DgP-Join $inis 'LilyPad.ini'),$ActiveSource))
+    foreach ($t in $targets) {
+        $dest = [string]$t[1]; $src = [string]$t[2]
+        $srcSha = DgFs-Sha256 $src
+        $curSha = ''
+        if (DgFs-Exists $dest) { $curSha = DgFs-Sha256 $dest }
+        $prev = $null
+        if ($null -ne $Previous -and [bool](DgProp $Previous 'Exists' $false)) {
+            foreach ($f in @($Previous.Files)) { if (DgP-PathEq ([string]$f.Destination) $dest) { $prev = $f } }
+        }
+        $action = ''; $reason = ''
+        if ($curSha.Length -eq 0) { $action = $(if (DgFs-DirExists $inis) { 'Add' } else { 'NotInitialized' }) }
+        elseif (DgEqI $curSha $srcSha) { $action = 'Unchanged' }
+        else {
+            # An Origin that is not usable beats every consent. That is the Origin of a ReplacedExisting record, and also the Origin that a kept user file (PreservedUserFile) set aside as PreviousOrigin:
+            # replacing the file under such a record would leave a replacement that can never be undone (backups: Backups[1..] are never an Origin).
+            $originBroken = $false
+            if ($null -ne $prev) {
+                if (DgEq ([string](DgProp $prev 'Ownership' '')) 'ReplacedExisting') { $originBroken = -not (Test-DenGoPcsx2PreviousOrigin $Layout $prev $LastClosedTransactionId) }
+                else {
+                    $setAside = DgProp $prev 'PreviousOrigin' $null
+                    if (($null -ne $setAside) -and (DgEq ([string](DgProp $setAside 'Ownership' '')) 'ReplacedExisting')) {
+                        $asRecord = [pscustomobject]@{ ExistedBefore = [bool](DgProp $setAside 'ExistedBefore' $false); BeforeSHA256 = [string](DgProp $setAside 'BeforeSHA256' ''); Backup = [string](DgProp $setAside 'Backup' ''); Backups = (DgProp $prev 'Backups' @()) }
+                        $originBroken = -not (Test-DenGoPcsx2PreviousOrigin $Layout $asRecord $LastClosedTransactionId)
+                    }
+                }
+            }
+            if ($originBroken) { $action = 'PreserveOriginInvalid'; $reason = 'OriginInvalid' }
+            else {
+                $ownsPrev = ($null -ne $prev) -and (Test-DenGoOwningOwnership ([string](DgProp $prev 'Ownership' '')))
+                $isUpdate = ($ownsPrev -and (DgEqI $curSha ([string](DgProp $prev 'AfterSHA256' ''))))
+                if ($isUpdate) { $action = 'UpdateOrRepair'; $reason = 'DenGoVersionUpdate' }
+                elseif ($ReplaceConsent) { $action = 'UpdateOrRepair'; $reason = 'ConsentGiven' }
+                else { $action = 'PreserveUserModified'; $reason = 'NoConsent' }
+            }
+        }
+        [void]$items.Add([pscustomobject]@{ Platform = 'PCSX2'; Component = [string]$t[0]; Action = $action; Source = $src; SourceSHA256 = $srcSha; Destination = $dest; DestinationSHA256 = $curSha; Reason = $reason })
+    }
+    return ,[object[]]@($items)
+}
+# The Origin of a record whose file is the user's again (kept, never lost): an earlier PreviousOrigin stays, a ReplacedExisting record hands over its Origin.
+function DgP-PreviousOriginOf {
+    param([object]$Prev)
+    $po = DgProp $Prev 'PreviousOrigin' $null
+    if ($null -ne $po) { return $po }
+    if (DgEq ([string](DgProp $Prev 'Ownership' '')) 'ReplacedExisting') {
+        return [pscustomobject][ordered]@{ Ownership = 'ReplacedExisting'; ExistedBefore = [bool](DgProp $Prev 'ExistedBefore' $false); BeforeSHA256 = [string](DgProp $Prev 'BeforeSHA256' ''); Backup = [string](DgProp $Prev 'Backup' '') }
+    }
+    return $null
+}
+# A record that I2-B / I2-C kept aside (no Presence, DeferredThisRun, NotDetectedThisRun) is promoted once: additive only, the Origin is never rewritten.
+function DgP-NeedsPromotion {
+    param([object]$Prev)
+    if ($null -ne (DgProp $Prev 'Promoted' $null)) { return $false }
+    $p = [string](DgProp $Prev 'Presence' '')
+    return (($p.Length -eq 0) -or (DgEq $p 'DeferredThisRun') -or (DgEq $p 'NotDetectedThisRun'))
+}
+# '' = promotable; otherwise the reason code that keeps a record that is outside this plan from being promoted (the record stays in Files, never closed).
+function DgP-PromotionBlock {
+    param([object]$Record)
+    $dest = [string](DgProp $Record 'Destination' '')
+    $leaf = ''; $parent = ''
+    try { $full = DgP-Full $dest; $leaf = [System.IO.Path]::GetFileName($full); $parent = [System.IO.Path]::GetFileName([System.IO.Path]::GetDirectoryName($full)) } catch { }
+    if (-not (((DgEqI $leaf 'LilyPad.ini') -or (DgEqI $leaf 'DenGo-Controller-Converter.lily')) -and (DgEqI $parent 'inis'))) { return 'DestinationNotFixedLeaf' }
+    $own = [string](DgProp $Record 'Ownership' '')
+    if (-not ((DgP-Pcsx2KnownOwnership) -ccontains $own)) { return 'OwnershipUnknown' }
+    if (DgEq $own 'ReplacedExisting') {
+        $before = [string](DgProp $Record 'BeforeSHA256' '')
+        if (-not ([bool](DgProp $Record 'ExistedBefore' $false)) -or ($before -notmatch '^[0-9A-Fa-f]{64}$') -or [string]::IsNullOrWhiteSpace([string](DgProp $Record 'Backup' ''))) { return 'OriginInvalid' }
+    }
+    return ''
+}
+# Information only (owner decision): the Origin of a CLOSED generation is reported. It is never restored, never promoted, never a candidate and never copied
+# into Files[] / Backups[]; uninstalled-state.json is only read.
+function Get-DenGoClosedGenerationPcsx2Origins {
+    param([object]$Layout)
+    $out = New-Object System.Collections.ArrayList
+    try {
+        $path = DgP-Join $Layout.StateRoot 'uninstalled-state.json'
+        if (-not (DgFs-Exists $path)) { return ,[object[]]@() }
+        $bytes = [byte[]](DgFs-ReadAllBytesShared $path)
+        $obj = (New-Object System.Text.UTF8Encoding($false)).GetString($bytes).TrimStart([char]0xFEFF) | ConvertFrom-Json
+        foreach ($d in @(DgProp $obj 'DeferredRecords' @())) {
+            $rec = DgProp $d 'Record' $null
+            if ($null -eq $rec -or -not (DgEq ([string](DgProp $rec 'Platform' '')) 'PCSX2')) { continue }
+            $bk = [string](DgProp $rec 'Backup' '')
+            if ($bk.Length -eq 0) { continue }
+            [void]$out.Add([pscustomobject][ordered]@{ Source = 'DeferredRecords'; Destination = [string](DgProp $rec 'Destination' ''); Path = $bk; SHA256 = [string](DgProp $rec 'BeforeSHA256' ''); Note = 'ReferenceOnly' })
+        }
+    } catch { }
+    return ,[object[]]@($out)
+}
 # ---------------------------------------------------------------- shortcut staging (the only place that touches a temporary folder)
 function DgPFs-NewStageDir { param([string]$Parent) $d = [System.IO.Path]::Combine($Parent,('DenGoShortcutStage-' + [System.Guid]::NewGuid().ToString('N'))); [System.IO.Directory]::CreateDirectory($d) | Out-Null; return $d }
 function DgPFs-NewShortcutFile {
@@ -474,11 +738,6 @@ function DgP-CopyRecord {
     return $o
 }
 function Test-DenGoOwningOwnership { param([string]$Ownership) return ((DgEq $Ownership 'CreatedByInstaller') -or (DgEq $Ownership 'MigratedMatchingDenGoFile') -or (DgEq $Ownership 'ReplacedExisting')) }
-# A record of a platform that is deferred (I3 takes it over) is never closed. Decided by the platform mapping only.
-function DgP-IsDeferredRecord {
-    param([object]$Record)
-    try { return [bool](DgP-MapPlatform ([string](DgProp $Record 'Platform' '')) ([string](DgProp $Record 'Destination' ''))).Deferred } catch { return $false }
-}
 # Shortcut.PreExisted = "the target shortcut existed before the CURRENT install generation began".
 #  - an earlier generation of the same shortcut (Created, same path) is the authority: PreExisted, Backup and BackupSHA256 are carried;
 #    this run's own backup is only appended to Backups[]
@@ -542,21 +801,29 @@ function Merge-DenGoInstalledState {
         $dest = [string]$e.Destination
         $key = $dest.ToUpperInvariant()
         $entryKeys[$key] = $e
-        if ([bool]$e.Deferred) { continue }          # carried forward below (Presence = DeferredThisRun)
         $prev = $null
         if ($prevByDest.ContainsKey($key)) { $prev = $prevByDest[$key] }
         $action = [string]$e.Action
         $backup = ''; $preSha = ''
         if ($TxByDest.ContainsKey($key)) { $backup = [string]$TxByDest[$key].Backup; $preSha = [string]$TxByDest[$key].PreSha }
         $isProfile = DgP-IsProfileComponent ([string]$e.Component)
-        $ownership = 'NotManaged'; $existedBefore = $false; $beforeSha = ''
+        $ownership = 'NotManaged'; $existedBefore = $false; $beforeSha = ''; $prevOrigin = $null
+        $isPcsx2 = DgP-IsPcsx2Record $e
         $newBackup = $backup
         if (DgEq $action 'Add') {
             $ownership = 'CreatedByInstaller'
         } elseif ((DgEq $action 'UpdateOrRepair') -or (DgEq $action 'Unchanged')) {
             if ($null -ne $prev) {
                 $po = [string]$prev.Ownership
-                if ((DgEq $po 'ReplacedExisting') -and -not $isProfile) {
+                if ($isPcsx2 -and (DgEq $action 'UpdateOrRepair') -and $isProfile -and ($backup.Length -gt 0) -and (DgP-IsNonOwningOwnership $po)) {
+                    # PCSX2 only: the user's file was kept earlier and the user now consents to the replacement. The content right before this replacement is
+                    # backed up by this transaction; the Origin of this generation is the Origin that was set aside (PreviousOrigin), else this backup.
+                    $ownership = 'ReplacedExisting'; $existedBefore = $true; $beforeSha = $preSha; $newBackup = $backup
+                    $po0 = DgProp $prev 'PreviousOrigin' $null
+                    if ($null -ne $po0 -and (DgEq ([string](DgProp $po0 'Ownership' '')) 'ReplacedExisting')) {
+                        $existedBefore = [bool](DgProp $po0 'ExistedBefore' $false); $beforeSha = [string](DgProp $po0 'BeforeSHA256' ''); $newBackup = [string](DgProp $po0 'Backup' '')
+                    }
+                } elseif ((DgEq $po 'ReplacedExisting') -and -not $isProfile) {
                     $ownership = 'MigratedMatchingDenGoFile'; $existedBefore = $false; $beforeSha = ''; $newBackup = ''
                 } else {
                     $ownership = $po; $existedBefore = [bool](DgProp $prev 'ExistedBefore' $false); $beforeSha = [string](DgProp $prev 'BeforeSHA256' ''); $newBackup = [string](DgProp $prev 'Backup' '')
@@ -569,9 +836,14 @@ function Merge-DenGoInstalledState {
             }
         } elseif (DgEq $action 'PreserveUserModified') {
             $ownership = 'PreservedUserFile'
-        } elseif (DgEq $action 'NotInitialized') {
+            if ($isPcsx2 -and $null -ne $prev) { $prevOrigin = DgP-PreviousOriginOf $prev }
+        } elseif ((DgEq $action 'NotInitialized') -or (DgEq $action 'PreserveOriginInvalid')) {
             # H-4: an earlier record is kept as it was; only a first sighting is recorded as NotInstalled
-            if ($null -ne $prev) { $ownership = [string]$prev.Ownership; $existedBefore = [bool](DgProp $prev 'ExistedBefore' $false); $beforeSha = [string](DgProp $prev 'BeforeSHA256' ''); $newBackup = [string](DgProp $prev 'Backup' '') }
+            # (PreserveOriginInvalid: the file is not written and the earlier record, Origin and Backups[] included, is kept whole)
+            if ($null -ne $prev) {
+                $ownership = [string]$prev.Ownership; $existedBefore = [bool](DgProp $prev 'ExistedBefore' $false); $beforeSha = [string](DgProp $prev 'BeforeSHA256' ''); $newBackup = [string](DgProp $prev 'Backup' '')
+                if ($isPcsx2) { $prevOrigin = DgProp $prev 'PreviousOrigin' $null }   # a kept user file keeps the Origin it set aside: the record is kept whole
+            }
             else { $ownership = 'NotInstalled' }
         }
         $afterSha = DgP-DoProbe $Probe $dest
@@ -582,6 +854,11 @@ function Merge-DenGoInstalledState {
             Platform = [string]$e.Platform; Component = [string]$e.Component; Destination = $dest; InstallAction = $action; Ownership = $ownership
             ExistedBefore = $existedBefore; BeforeSHA256 = $beforeSha; AfterSHA256 = $afterSha; Backup = $newBackup
             Presence = 'InPlan'; Observed = $(if ($afterSha.Length -gt 0) { 'Present' } else { 'Missing' }); LastSeenTransactionId = $TxnId; Backups = [object[]]@($backups) }
+        if ($null -ne $prevOrigin) { $rec['PreviousOrigin'] = $prevOrigin }
+        if ($isPcsx2 -and $null -ne $prev -and (DgP-NeedsPromotion $prev)) {
+            $fromPresence = [string](DgProp $prev 'Presence' '')
+            $rec['Promoted'] = [pscustomobject][ordered]@{ FromPresence = $fromPresence; AtTransactionId = $TxnId; FromFormat = $(if ($fromPresence.Length -eq 0) { 'Legacy' } else { 'I2B' }) }
+        }
         [void]$records.Add([pscustomobject]$rec)
     }
     # carried-forward records: everything that was recorded before and is not part of this transaction's plan
@@ -589,17 +866,22 @@ function Merge-DenGoInstalledState {
     if ($null -ne $prevState) { foreach ($c in @(DgProp $prevState 'ClosedRecords' @())) { [void]$closed.Add($c) } }
     foreach ($f in $prevFiles) {
         $key = ([string]$f.Destination).ToUpperInvariant()
-        if ($entryKeys.ContainsKey($key) -and -not [bool]$entryKeys[$key].Deferred) { continue }
+        if ($entryKeys.ContainsKey($key)) { continue }
         $copy = DgP-CopyRecord $f
-        $presence = $(if ($entryKeys.ContainsKey($key)) { 'DeferredThisRun' } else { 'NotDetectedThisRun' })
+        $presence = 'NotDetectedThisRun'
         $cur = DgP-DoProbe $Probe ([string]$f.Destination)
         $observed = 'Present'
         if ($cur.Length -eq 0) { $observed = 'Missing' } elseif (-not (DgEq $cur ([string](DgProp $f 'AfterSHA256' '')))) { $observed = 'Diverged' }
         $copy['Presence'] = $presence; $copy['Observed'] = $observed
-        # A record is closed only when it is outside this plan (no entry at all, Deferred or not), owns nothing, its file is gone and it is not
-        # a record that I3 takes over (a deferred platform). Everything else stays in Files.
+        # A PCSX2 record that is outside this plan and was not promoted yet says why (the reason is dropped again when it no longer applies); it stays in Files.
+        if ((DgP-IsPcsx2Record $f) -and $null -eq (DgProp $f 'Promoted' $null)) {
+            $blocked = DgP-PromotionBlock $f
+            if ($blocked.Length -gt 0) { $copy['PromotionBlocked'] = $blocked } elseif ($copy.Contains('PromotionBlocked')) { $copy.Remove('PromotionBlocked') }
+        }
+        # A record is closed only when it is outside this plan, owns nothing, its file is gone and it is not a PCSX2 record (a platform that is not found now
+        # is not cleaned up: the decision is the platform name, not a deferral). Everything else stays in Files.
         $inPlan = $entryKeys.ContainsKey($key)
-        if ((-not $inPlan) -and (-not (DgP-IsDeferredRecord $f)) -and (-not (Test-DenGoOwningOwnership ([string]$f.Ownership))) -and (DgEq $observed 'Missing')) {
+        if ((-not $inPlan) -and (-not (DgP-IsPcsx2Record $f)) -and (-not (Test-DenGoOwningOwnership ([string]$f.Ownership))) -and (DgEq $observed 'Missing')) {
             [void]$closed.Add([pscustomobject][ordered]@{ Record = [pscustomobject]$copy; ClosedAt = $Now; ClosedTransactionId = $TxnId; Reason = 'NoOwnershipAndMissing' })
             continue
         }
@@ -808,7 +1090,7 @@ function DgP-NewResult {
         Succeeded = $false; ErrorCode = ''; ErrorMessage = ''; FailedSet = ''; RollbackAttempted = $false; RollbackSucceeded = $true; RollbackError = ''
         TransactionId = ''; TransactionCode = ''; RollbackState = 'NotStarted'; RecoveryOutcome = ''; FailedItem = -1; ManualCheckRequired = $false; Recovery = $null; Reasons = [object[]]@(); ReportPath = ''
         BackupRoot = ''; Results = [object[]]@(); DeferredItems = [object[]]@(); StateCommitted = $false; LockAcquired = $false
-        ShortcutRequested = $false; ShortcutCreated = $false; ShortcutPath = ''; ShortcutError = '' }
+        ShortcutRequested = $false; ShortcutCreated = $false; ShortcutPath = ''; ShortcutError = ''; ClosedGenerationPcsx2Origins = [object[]]@() }
 }
 function DgP-InvokeProcessGate {
     param([hashtable]$Options,[string]$Phase)
@@ -873,6 +1155,8 @@ function Invoke-DenGoProductInstall {
         # (4) previous state (never swallowed)
         $prev = $null
         try { $prev = Read-DenGoPreviousState $Layout } catch { $res.ErrorCode = (DgError-Code $_.Exception); $res.ErrorMessage = [string](DgError-Root $_.Exception).Message; return $res }
+        # (4b) information only: the Origin of a CLOSED generation is reported, never used (uninstalled-state.json is only read)
+        $res.ClosedGenerationPcsx2Origins = Get-DenGoClosedGenerationPcsx2Origins $Layout
         # (5) shortcut staging (non-fatal)
         if ($res.ShortcutRequested) {
             $stage = New-DenGoStagedShortcut $Layout $stageParent $prev

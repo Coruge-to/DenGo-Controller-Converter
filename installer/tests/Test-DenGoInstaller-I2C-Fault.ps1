@@ -56,6 +56,14 @@ foreach ($s in (Get-I2BItemSpecs $L)) { if ($s.Pl -in @('Core', 'BVE5', 'BVE6', 
 [void]$removedKeys.Add('f:' + (Get-I2CRel $L $P.ShortcutPath))
 $ymlKey = 'f:' + (Get-I2CRel $L $ymlPath)
 $ymlOriginalSha = Get-I2AContentSha 'user-original-yml'
+# I3-D follow-up: PCSX2's LilyPad.ini (ReplacedExisting in this generation) is restored from its Origin by default (DE-I3-3); the .lily profile is kept; no other PCSX2 file is touched
+$lilyPadPath = Get-I2CLeafPath $L 'LilyPad.ini'
+$lilyPadKey = 'f:' + (Get-I2CRel $L $lilyPadPath)
+$lilyPadOriginalSha = Get-I2AContentSha (Get-I2BContent 'P1' 'p2' 'old')
+# this suite uninstalls with IncludeInputProfiles (Run-Uninstall defaults to $true): the unedited .lily profile the installer created is removed as well (D-07b of the I3 decision table)
+$lilyProfilePath = Get-I2CLeafPath $L 'DenGo-Controller-Converter.lily'
+[void]$removedKeys.Add('f:' + (Get-I2CRel $L $lilyProfilePath))
+$lilyProfileKey = 'f:' + (Get-I2CRel $L $lilyProfilePath)
 function Test-T1Oracle($Pre, $Post) {
     $problems = New-Object System.Collections.ArrayList
     foreach ($d in @(Compare-I2ATree $Pre $Post)) {
@@ -64,11 +72,13 @@ function Test-T1Oracle($Pre, $Post) {
         if ($key -eq 'x:is') { if (-not ($kind -eq '~' -and $Post[$key] -eq '<none>')) { [void]$problems.Add('installed-state not retired: ' + $d) }; continue }
         if ($key -eq 'x:us') { if (-not ($kind -eq '~' -and $Post[$key] -eq 'NEW')) { [void]$problems.Add('uninstalled-state not new: ' + $d) }; continue }
         if ($key -eq $ymlKey) { if (-not ($kind -eq '~' -and $Post[$key] -eq $ymlOriginalSha)) { [void]$problems.Add('profile is not the original: ' + $d) }; continue }
+        if ($key -eq $lilyPadKey) { if (-not ($kind -eq '~' -and $Post[$key] -eq $lilyPadOriginalSha)) { [void]$problems.Add('LilyPad.ini is not the original: ' + $d) }; continue }
         if ($kind -eq '-' -and $removedKeys -contains $key) { continue }
         [void]$problems.Add('unexpected: ' + $d)
     }
     foreach ($k in $removedKeys) { if ($Post.ContainsKey($k)) { [void]$problems.Add('not removed: ' + $k) } }
-    foreach ($k in @($Pre.Keys)) { if ($k -like 'f:pcsx2\*') { if (-not ($Post.ContainsKey($k) -and ($Post[$k] -eq $Pre[$k]))) { [void]$problems.Add('PCSX2 file changed: ' + $k) } } }
+    if (-not ($Post.ContainsKey($lilyPadKey) -and ($Post[$lilyPadKey] -eq $lilyPadOriginalSha))) { [void]$problems.Add('LilyPad.ini was not restored to its Origin') }
+    foreach ($k in @($Pre.Keys)) { if (($k -like 'f:pcsx2\*') -and ($k -ne $lilyPadKey) -and ($k -ne $lilyProfileKey)) { if (-not ($Post.ContainsKey($k) -and ($Post[$k] -eq $Pre[$k]))) { [void]$problems.Add('PCSX2 file changed: ' + $k) } } }
     foreach ($k in @($Pre.Keys)) { if ($k -like 'f:guard\*' -or $k -like 'f:src\*') { if (-not ($Post.ContainsKey($k) -and ($Post[$k] -eq $Pre[$k]))) { [void]$problems.Add('input file changed: ' + $k) } } }
     return , @($problems)
 }
@@ -88,10 +98,12 @@ $hist = @(Get-I2CHistoryFiles $L)
 [void](Assert-I2A 'A-installed-state-archived-and-deleted' ((-not [System.IO.File]::Exists($P.StatePath)) -and (@($hist | Where-Object { $_ -like '*\installed-state.*.json' }).Count -eq 1) -and ((Get-I2AFileSha $us.ClosedGeneration.ArchivedStatePath) -eq $us.ClosedGeneration.ArchivedStateSha256.ToUpperInvariant())) 'one content-addressed archive; its SHA is the one recorded in ClosedGeneration')
 [void](Assert-I2A 'A-journal-history' ((@(Get-I2CHistoryFiles $L 'txn-*.committed.jsonl').Count -eq 2) -and (@(Get-I2CHistoryFiles $L 'txn-*.rolledback.jsonl').Count -eq 0)) 'install + uninstall committed journals in history')
 $regPaths = @(); $hj = @(Get-I2CHistoryFiles $L 'txn-T0002.committed.jsonl'); if ($hj.Count -eq 1) { $regPaths = @((DgJournal-Parse $hj[0]).Records | Where-Object { $_.stage -eq 'Register' } | ForEach-Object { [string]$_.path }) }
-[void](Assert-I2A 'A-only-fixed-leaves-registered' (($regPaths.Count -ge 10) -and (@($regPaths | Where-Object { $_ -match 'Pcsx2|LilyPad|Uninstall\.exe|UninstallRollback|Other|g1\.txt' }).Count -eq 0)) "registered $($regPaths.Count) paths, none under PCSX2 / LilyPad / Uninstall.exe / neighbours")
+$pcsx2Regs = @($regPaths | Where-Object { $_ -match 'Pcsx2|LilyPad' })
+[void](Assert-I2A 'A-only-fixed-leaves-registered' (($regPaths.Count -ge 10) -and (@($regPaths | Where-Object { $_ -match 'Uninstall\.exe|UninstallRollback|Other|g1\.txt' }).Count -eq 0) -and ($pcsx2Regs.Count -eq 2) -and (@($pcsx2Regs | Where-Object { $_ -like '*\inis\LilyPad.ini' }).Count -eq 1) -and (@($pcsx2Regs | Where-Object { $_ -like '*\inis\DenGo-Controller-Converter.lily' }).Count -eq 1)) "registered $($regPaths.Count) paths: none of Uninstall.exe / neighbours; of the PCSX2 tree exactly the two fixed leaves (LilyPad.ini restored, the .lily profile removed on request)")
 [void](Assert-I2A 'A-installed-state-delete-is-the-last-item-and-archive-before-it' (($regPaths.Count -ge 2) -and ($regPaths[-1] -like '*installed-state.json') -and ($regPaths[-2] -like '*history\installed-state.*.json')) ('last two registered: ' + ($regPaths[-2..-1] -join ' , ')))
-$usedOk = (@($us.UsedBackups).Count -eq 1) -and ($us.UsedBackups[0].Path -like '*\T0001\*')
-[void](Assert-I2A 'A-restore-used-the-origin-of-this-generation' $usedOk 'the profile was restored from the generation''s own Origin backup')
+$usedDests = @($us.UsedBackups | ForEach-Object { [System.IO.Path]::GetFileName([string]$_.Destination) } | Sort-Object)
+$usedOk = (@($us.UsedBackups).Count -eq 2) -and (@($us.UsedBackups | Where-Object { $_.Path -notlike '*\T0001\*' }).Count -eq 0) -and (($usedDests -join ',') -ceq 'Den-Go-Controller.yml,LilyPad.ini')
+[void](Assert-I2A 'A-restore-used-the-origin-of-this-generation' $usedOk 'the RPCS3 profile and PCSX2 LilyPad.ini were restored, each from the generation''s own Origin backup (T0001)')
 Add-I2AEvidence @{ id = 'A-happy'; mutPoints = $MutN; allPoints = $AllN; tree = (Get-I2ATreeDigest $T1) }
 
 # ---------------------------------------------------------------- B/C. crash sweep and exception sweep
@@ -239,8 +251,12 @@ Reset-World
 $r = Run-Uninstall $false
 $us = Get-I2CUs $L
 $ymlBefore = 'x'
-[void](Assert-I2A 'D-N24-profile-kept-by-default' (($r.Succeeded -eq $true) -and ([System.IO.File]::Exists($ymlPath)) -and (@($us.ResidualFiles | Where-Object { $_.Disposition -eq 'KeepProfile' }).Count -eq 1) -and ($us.InputProfilesPreserved -eq $true) -and ($us.ManualCheckRequired -eq $false)) 'InputProfile kept: Completed, residual recorded, no manual check')
-[void](Assert-I2A 'D-N24-kept-profile-is-still-the-denGo-profile-and-origin-not-used' (($us.UsedBackups.Count -eq 0) -and (@($us.UnusedBackups | Where-Object { $_.Destination -eq $ymlPath }).Count -ge 1)) 'no backup was used; the Origin is listed as unused')
+# I3-D follow-up: two profiles are kept by default now (RPCS3's yml and PCSX2's .lily); PCSX2's LilyPad.ini is restored from its Origin whatever IncludeInputProfiles says (DE-I3-3)
+$keptResiduals = @($us.ResidualFiles | Where-Object { $_.Disposition -eq 'KeepProfile' } | ForEach-Object { [string]$_.Path } | Sort-Object)
+$expectKept = @($ymlPath, (Get-I2CLeafPath $L 'DenGo-Controller-Converter.lily')) | Sort-Object
+[void](Assert-I2A 'D-N24-profile-kept-by-default' (($r.Succeeded -eq $true) -and ([System.IO.File]::Exists($ymlPath)) -and ($keptResiduals.Count -eq 2) -and (($keptResiduals -join '|') -ceq ($expectKept -join '|')) -and ($us.InputProfilesPreserved -eq $true) -and ($us.ManualCheckRequired -eq $false)) 'RPCS3 yml and PCSX2 .lily kept: Completed, the two residuals recorded (by path), no manual check')
+$usedPaths24 = @($us.UsedBackups | ForEach-Object { [System.IO.Path]::GetFileName([string]$_.Destination) })
+[void](Assert-I2A 'D-N24-kept-profile-is-still-the-denGo-profile-and-origin-not-used' (($us.UsedBackups.Count -eq 1) -and ($usedPaths24 -contains 'LilyPad.ini') -and (@($us.UnusedBackups | Where-Object { $_.Destination -eq $ymlPath }).Count -ge 1) -and ((Get-I2AFileSha $lilyPadPath) -eq $lilyPadOriginalSha)) 'only the LilyPad.ini Origin was used (and the file is the original again); the kept yml''s Origin is listed as unused')
 # ClosedRecords: never applied
 Reset-World
 $closedFile = Join-Path $L.Guard 'closed-target.dll'
@@ -250,25 +266,25 @@ $closedSha = Get-I2AFileSha $closedFile
 $r = Run-Uninstall
 $us = Get-I2CUs $L
 [void](Assert-I2A 'D-N25-closed-records-untouched' (($r.Succeeded -eq $true) -and ((Get-I2AFileSha $closedFile) -eq $closedSha) -and (@($us.ClosedRecords).Count -eq 1) -and ($us.ClosedRecords[0].Record.Destination -eq $closedFile) -and (@($us.Items | Where-Object { $_.Destination -eq $closedFile }).Count -eq 0)) 'a closed record is history only: the file is unchanged and is not an item; the record is carried into the uninstalled state')
-# PCSX2 / LilyPad: deferred, never touched
+# PCSX2 / LilyPad (I3-D follow-up: not deferred any more). The generation's own two records are used as they are (no duplicates): LilyPad.ini is restored from its Origin,
+# the .lily profile is kept, every other PCSX2 file is byte-identical, nothing is deferred or closed, the Origin backup is kept, and only LilyPad.ini is registered in the journal.
 Reset-World
-$lily = Join-Path $L.Pcsx2Inis 'LilyPad.ini'
-$lilyBak = Join-Path $P.BackupRoot 'T0001\0099.bak'
-[System.IO.File]::WriteAllText($lilyBak, 'old lilypad', $script:Utf8)
-Add-I2CRecord $L (New-I2CRecord 'PCSX2' 'EffectiveInputProfile' $lily 'ReplacedExisting' (Get-I2AFileSha $lily) (Get-I2AFileSha $lilyBak) $lilyBak $true)
-Add-I2CRecord $L (New-I2CRecord 'PCSX2' 'InputProfile' (Join-Path $L.Pcsx2Inis 'DenGo-Controller-Converter.lily') 'CreatedByInstaller' ('56' * 32))
+$lily = $lilyPadPath
+$lilyBak = [string](Get-I2CRecord (Get-I2CIs $L) 'LilyPad.ini' 'PCSX2').Backup
 $pcsx2Pre = @{}; foreach ($f in [System.IO.Directory]::GetFiles($L.Pcsx2Inis)) { $pcsx2Pre[$f] = Get-I2AFileSha $f }
 $r = Run-Uninstall
 $us = Get-I2CUs $L
-$pcsx2Same = $true; foreach ($f in $pcsx2Pre.Keys) { if (-not ([System.IO.File]::Exists($f) -and (Get-I2AFileSha $f) -eq $pcsx2Pre[$f])) { $pcsx2Same = $false } }
-[void](Assert-I2A 'D-N26-pcsx2-lilypad-untouched' (($r.Succeeded -eq $true) -and $pcsx2Same -and ([System.IO.File]::Exists($lilyBak)) -and (@($us.DeferredRecords).Count -eq 2) -and (@($us.ClosedRecords).Count -eq 0) -and ($us.Counts.Deferred -eq 2)) "Completed; every PCSX2 file byte-identical; both records in DeferredRecords, none in ClosedRecords")
+$pcsx2Same = $true; foreach ($f in $pcsx2Pre.Keys) { if (($f -ne $lily) -and ($f -ne $lilyProfilePath)) { if (-not ([System.IO.File]::Exists($f) -and (Get-I2AFileSha $f) -eq $pcsx2Pre[$f])) { $pcsx2Same = $false } } }
+[void](Assert-I2A 'D-N26-pcsx2-lilypad-untouched' (($r.Succeeded -eq $true) -and $pcsx2Same -and ((Get-I2AFileSha $lily) -eq $lilyPadOriginalSha) -and (-not [System.IO.File]::Exists($lilyProfilePath)) -and ($lilyBak.Length -gt 0) -and [System.IO.File]::Exists($lilyBak) -and (@($us.DeferredRecords).Count -eq 0) -and (@($us.ClosedRecords).Count -eq 0) -and ($us.Counts.Deferred -eq 0)) "Completed; LilyPad.ini is the original again, the unedited .lily profile is removed on request, PCSX2.ini and every other PCSX2 file are byte-identical; no DeferredRecords, none in ClosedRecords; the Origin backup is kept")
 $regs = @(); $hj = @(Get-I2CHistoryFiles $L 'txn-T0002.committed.jsonl'); if ($hj.Count -eq 1) { $regs = @((DgJournal-Parse $hj[0]).Records | Where-Object { $_.stage -eq 'Register' } | ForEach-Object { [string]$_.path }) }
-[void](Assert-I2A 'D-N26-pcsx2-never-registered-or-restored' (($regs.Count -gt 0) -and (@($regs | Where-Object { $_ -match 'Pcsx2|LilyPad' }).Count -eq 0)) 'no PCSX2 path was registered in the journal: no PCSX2 allowed root exists')
-# a PCSX2 record alone never stops the uninstall (and a garbage PCSX2 record neither)
+$regsPcsx2 = @($regs | Where-Object { $_ -match 'Pcsx2|LilyPad' })
+[void](Assert-I2A 'D-N26-pcsx2-never-registered-or-restored' (($regs.Count -gt 0) -and ($regsPcsx2.Count -eq 2) -and (@($regsPcsx2 | Where-Object { $_ -like '*\inis\LilyPad.ini' -or $_ -like '*\inis\DenGo-Controller-Converter.lily' }).Count -eq 2)) 'exactly the two fixed PCSX2 leaves are registered in the journal (LilyPad.ini restored, the .lily profile removed); PCSX2.ini and every other PCSX2 file are not')
+# an unknown PCSX2 record now stops the uninstall like on every other platform (no Deferred shortcut): zero change, no marker
 Reset-World
 Add-I2CRecord $L (New-I2CRecord 'PCSX2' 'InputProfile' 'garbage' 'WhatIsThis' 'zz')
+$treeBeforeGarbage = Tree
 $r = Run-Uninstall
-[void](Assert-I2A 'D-N27-garbage-pcsx2-record-does-not-fail-the-uninstall' ($r.Succeeded -eq $true) "code=$($r.ErrorCode)")
+[void](Assert-I2A 'D-N27-garbage-pcsx2-record-does-not-fail-the-uninstall' (($r.Succeeded -eq $false) -and ($r.ErrorCode -eq 'UnsafeOrUnknown') -and (Same $treeBeforeGarbage (Tree)) -and (-not (Marker)) -and (Clean)) "code=$($r.ErrorCode): a garbage PCSX2 record (unknown ownership, not a fixed leaf) is UnsafeOrUnknown - the run stops with nothing changed")
 
 # --- shortcut contract through the whole run
 Reset-World
@@ -365,9 +381,20 @@ $r = Run-Uninstall
 New-CrashedAt '^after:Journal:Verified#3$'
 $bveDll = Get-I2CLeafPath $L 'DenGoControllerConverter.dll'
 $victim = $L.Guard
-Reset-I2AFault -Mode 'Label' -Pattern '^before:Fs-MoveNew:' -Nth 2 -Action 'Callback' -Callback { param($a) [System.IO.File]::WriteAllText($script:I2CVictim, 'changed by a third party after the preflight', [System.Text.Encoding]::UTF8) }
 $ids = @((DgJournal-Parse (Join-Path $P.StateRoot 'txn\T0002\journal.jsonl')).Records | Where-Object { $_.stage -eq 'Register' } | ForEach-Object { [string]$_.normalizedPath })
 $script:I2CVictim = $ids[0]
+# I3-D follow-up: the injection point was a typed ordinal ("the 2nd restore"); PCSX2 adds items, so it is measured now. A recording run of the same recovery lists the restores (Fs-MoveNew) in order;
+# the victim (the first registered item, restored LAST) is tampered with right before the restore that precedes its own, exactly as before.
+$snapN43 = Save-I2ATree $L.Root
+Reset-I2AFault -Record $true; $global:I2AFH.IdCounter = 1
+$null = Run-Uninstall
+$moveLabels = @($global:I2AFH.AllLabels | Where-Object { $_ -match '^before:Fs-MoveNew:' })
+$victimNth = [array]::IndexOf($moveLabels, ('before:Fs-MoveNew:' + [System.IO.Path]::GetFileName($script:I2CVictim))) + 1
+Release-I2AHeld; Restore-I2ATree $L.Root $snapN43
+$tamperNth = [Math]::Max(1, $victimNth - 1)
+[void](Assert-I2A 'D-N43-injection-point-is-measured' (($victimNth -ge 1) -and ($moveLabels.Count -ge 2)) "the recovery restores $($moveLabels.Count) files with Fs-MoveNew; the victim is restore number $victimNth, so the third-party change is injected before restore number $tamperNth")
+Reset-I2AFault -Mode 'Label' -Pattern '^before:Fs-MoveNew:' -Nth $tamperNth -Action 'Callback' -Callback { param($a) [System.IO.File]::WriteAllText($script:I2CVictim, 'changed by a third party after the preflight', [System.Text.Encoding]::UTF8) }
+$global:I2AFH.IdCounter = 1
 $r = Run-Uninstall
 $rb = [string]$r.RollbackState
 [void](Assert-I2A 'D-N43-rollback-incomplete-keeps-marker-and-evidence' (($r.Succeeded -eq $false) -and ($r.ErrorCode -eq 'RecoveryRequired') -and ($r.ManualCheckRequired -eq $true) -and (Marker)) "code=$($r.ErrorCode) recovery=$($r.Recovery.Outcome) reasons=[$((Get-I2CReasonCodes $r) -join ',')]")
@@ -492,7 +519,11 @@ Restore-I2ATree $H.Root $snapBeforeTamper
 # H6-4 the good uninstall of generation 2 restores ITS Origin (the edited profile), never generation 1's
 $u4 = Run-HUninstall
 $hus = Get-I2CUs $H
-[void](Assert-I2A 'H6-4-generation-2-uninstall-restores-its-own-origin' (($u4.Succeeded -eq $true) -and ((Get-I2AFileSha $hyml) -eq $editedSha2) -and ([System.IO.File]::ReadAllText($hyml) -eq 'user-edited-after-uninstall') -and (@($hus.UsedBackups).Count -eq 1) -and ($hus.UsedBackups[0].Path -eq $rec2.Backup) -and ($hus.UsedBackups[0].Path -ne $gen1Backup)) "restored content: [$([System.IO.File]::ReadAllText($hyml))]; used backup is generation 2's")
+# I3-D follow-up: generation 2 restores two Origins (the RPCS3 profile and PCSX2's LilyPad.ini), both its own; none of generation 1's backups (any file) is used
+$gen1BackupPaths = @($gen1State.Files | ForEach-Object { @([string]$_.Backup) + @(@($_.Backups) | ForEach-Object { [string]$_.Path }) } | Where-Object { $_.Length -gt 0 })
+$rec2Lily = Get-I2CRecord $gen2State 'LilyPad.ini' 'PCSX2'
+$usedByGen2 = @($hus.UsedBackups | ForEach-Object { [string]$_.Path })
+[void](Assert-I2A 'H6-4-generation-2-uninstall-restores-its-own-origin' (($u4.Succeeded -eq $true) -and ((Get-I2AFileSha $hyml) -eq $editedSha2) -and ([System.IO.File]::ReadAllText($hyml) -eq 'user-edited-after-uninstall') -and (@($hus.UsedBackups).Count -eq 2) -and ($usedByGen2 -contains [string]$rec2.Backup) -and ($usedByGen2 -contains [string]$rec2Lily.Backup) -and (@($usedByGen2 | Where-Object { $gen1BackupPaths -contains $_ }).Count -eq 0) -and ($hus.UsedBackups[0].Path -ne $gen1Backup)) "restored content: [$([System.IO.File]::ReadAllText($hyml))]; used backups: $($usedByGen2.Count), all generation 2's")
 [void](Assert-I2A 'H6-4-lineage-recorded' (($hus.PreviousUninstalledState.Exists -eq $true) -and (Test-Path $hus.PreviousUninstalledState.ArchivedPath) -and (@(Get-I2CHistoryFiles $H 'installed-state.*.json').Count -eq 2) -and ($hus.ClosedGeneration.GenerationId -ne $u1.GetType().Name)) 'generation 1''s uninstalled-state and both closed installed-states are in history')
 [void](Assert-I2A 'H6-4-no-old-generation-backup-in-used-list' (@($hus.UsedBackups | Where-Object { $_.Path -like ('*' + [string]$gen1State.TransactionId + '*') -or $_.Path -eq $gen1Backup }).Count -eq 0) 'UsedBackups never names a closed generation''s backup')
 # H6-6 the legacy H-6 state: old installed-state kept by the old uninstaller + its old uninstalled-state, then (here) a restore would be needed
@@ -507,7 +538,11 @@ $hlBefore = Get-I2BFullTree $HL
 $ul = Invoke-I2CUninstall $HL $true
 $hlCodes = $ul.ErrorCode
 [void](Assert-I2A 'H6-6-legacy-contaminated-state-blocks-a-needed-restore' (($gl.Succeeded -eq $true) -and ($ul.Succeeded -eq $false) -and ($ul.ErrorCode -eq 'ContaminationBlocksRestore') -and ($ul.ContaminationSuspect -eq $true) -and (Same $hlBefore (Get-I2BFullTree $HL))) "code=${hlCodes}; zero change (the profile is not overwritten)")
-# ... and with the restore not needed (profile kept), the Created files are removed by SHA match and the suspicion is recorded
+# I3-D follow-up: PCSX2's LilyPad.ini is restored from its Origin BY DEFAULT, so the default (profiles kept) uninstall of this contaminated state is blocked as well, with zero change
+$ulDefault = Invoke-I2CUninstall $HL $false
+[void](Assert-I2A 'H6-6-contaminated-state-also-blocks-the-default-pcsx2-restore' (($ulDefault.Succeeded -eq $false) -and ($ulDefault.ErrorCode -eq 'ContaminationBlocksRestore') -and (Same $hlBefore (Get-I2BFullTree $HL))) "code=$($ulDefault.ErrorCode); zero change (PCSX2 LilyPad.ini and the profile are not overwritten)")
+# ... and with no restore needed at all (the LilyPad.ini record has no Origin), the Created files are removed by SHA match and the suspicion is recorded
+Edit-I2CInstalledState $HL { param($o) $x = Get-I2CRecord $o 'LilyPad.ini' 'PCSX2'; $x.Ownership = 'MigratedMatchingDenGoFile'; $x.ExistedBefore = $false; $x.BeforeSHA256 = ''; $x.Backup = '' }
 $ul2 = Invoke-I2CUninstall $HL $false
 $usl = Get-I2CUs $HL
 [void](Assert-I2A 'H6-6-contaminated-state-without-a-restore-completes' (($ul2.Succeeded -eq $true) -and ($usl.ClosedGeneration.ContaminationSuspect -eq $true) -and (@($usl.ClosedGeneration.ContaminationReasons).Count -eq 1) -and ($usl.ManualCheckRequired -eq $true) -and ([System.IO.File]::Exists($hlyml)) -and (-not [System.IO.File]::Exists((Get-I2CLeafPath $HL 'DenGoControllerConverter.exe'))) -and (@($usl.UnusedBackups | Where-Object { $_.Reason -eq 'ContaminationSuspect' }).Count -ge 1)) "Completed; Created files removed; the profile kept; suspicion + unused backups recorded; ManualCheckRequired=$($usl.ManualCheckRequired)")
@@ -565,6 +600,7 @@ if (-not $SkipSweeps) {
     $gA = Install-I2CGeneration $GS
     $gen1Is = Get-I2CIs $GS
     $gen1Backup = [string](Get-I2CRecord $gen1Is 'Den-Go-Controller.yml').Backup
+    $gen1LilyBackup = [string](Get-I2CRecord $gen1Is 'LilyPad.ini').Backup
     $uA = Invoke-GRun
     $us1Path = Get-I2CUsPath $GS
     $us1Bytes = [System.IO.File]::ReadAllBytes($us1Path)
@@ -573,6 +609,7 @@ if (-not $SkipSweeps) {
     $gB = Install-I2CGeneration $GS
     $gen2Is = Get-I2CIs $GS
     $gen2Backup = [string](Get-I2CRecord $gen2Is 'Den-Go-Controller.yml').Backup
+    $gen2LilyBackup = [string](Get-I2CRecord $gen2Is 'LilyPad.ini').Backup
     $gen2Sha = (Get-I2AFileSha $GP.StatePath).ToLowerInvariant()
     [void](Assert-I2A 'GEN00-setup-previous-uninstalled-state-next-to-a-new-generation' (($gA.Succeeded -eq $true) -and ($uA.Succeeded -eq $true) -and ($gB.Succeeded -eq $true) -and (Test-I2CUsValid $GS) -and [System.IO.File]::Exists($GP.StatePath) -and ($gen1Backup -ne $gen2Backup) -and [System.IO.File]::Exists($gen1Backup) -and [System.IO.File]::Exists($gen2Backup) -and ((Get-GUsSha) -eq $us1Sha) -and ((Cnt (Get-I2CHistoryFiles $GS 'uninstalled-state.*.json')) -eq 0)) "g1=$($gA.Succeeded) u1=$($uA.Succeeded) g2=$($gB.Succeeded); generation 1 and 2 Origin backups differ; generation 1's uninstalled-state is valid and still the only one")
     $gIdBase = [int]$global:I2AFH.IdCounter; $gTickBase = [int]$global:I2AFH.Tick
@@ -601,7 +638,9 @@ if (-not $SkipSweeps) {
         else { if ((Get-GClosedJson (Read-I2CJson $arch)) -ne $us1Closed) { [void]$p.Add('previous ClosedGeneration changed') } }
         if (-not (Test-GArchivesContentAddressed)) { [void]$p.Add('a history copy is not named by its content SHA') }
         $used = @($us.UsedBackups)
-        if (($used.Count -ne 1) -or ([string]$used[0].Path -ne $gen2Backup) -or ([string]$used[0].Path -eq $gen1Backup)) { [void]$p.Add('UsedBackups is not exactly generation 2''s Origin backup') }
+        $usedPathsG = @($used | ForEach-Object { [string]$_.Path })
+        $usedDestsG = @($used | ForEach-Object { [System.IO.Path]::GetFileName([string]$_.Destination) } | Sort-Object)
+        if (($used.Count -ne 2) -or ($usedPathsG -notcontains $gen2Backup) -or ($usedPathsG -notcontains $gen2LilyBackup) -or ($usedPathsG -contains $gen1Backup) -or ($usedPathsG -contains $gen1LilyBackup) -or (($usedDestsG -join ',') -cne 'Den-Go-Controller.yml,LilyPad.ini')) { [void]$p.Add('UsedBackups is not exactly generation 2''s two Origin backups (Den-Go-Controller.yml and LilyPad.ini; used: ' + [string]::Join(' ; ', [string[]]@($used | ForEach-Object { [string]$_.Path + ' -> ' + [string]$_.Destination })) + '; generation 2: ' + $gen2Backup + ' , ' + $gen2LilyBackup + ')') }
         foreach ($b in $bakBeforeG) { if (-not [System.IO.File]::Exists($b)) { [void]$p.Add('a backup was deleted: ' + $b) } }
         if ((Cnt (Test-I2CLeftovers $GS)) -ne 0) { [void]$p.Add('leftovers: ' + [string]::Join(',', [string[]]@(Test-I2CLeftovers $GS))) }
         if (Get-GMarker) { [void]$p.Add('marker left') }
@@ -629,7 +668,7 @@ if (-not $SkipSweeps) {
     [void](Assert-I2A 'GEN03-archive-previous-state-then-archive-installed-state-then-delete-last' (($iUs -ge 0) -and ($iUs -lt $iIs) -and ($iIs -lt $iDel) -and ($iDel -eq ($regG.Count - 1))) "register order: previous-uninstalled-state archive=#$iUs, installed-state archive=#$iIs, installed-state delete=#$iDel of $($regG.Count)")
     $gRequired = @(
         @('first Intent', 'Journal:Intent#0$'), @('previous uninstalled-state archive copy', 'Fs-CopyFileDurable:uninstalled-state\.[0-9a-f]{64}\.json\.dengo\.tmp$'), @('previous uninstalled-state archive move', 'Fs-MoveNew:uninstalled-state\.[0-9a-f]{64}\.json$'),
-        @('installed-state archive move', 'Fs-MoveNew:installed-state\.[0-9a-f]{64}\.json$'), @('installed-state Delete', 'Fs-Delete:installed-state\.json$'), @('CommitIntent', 'Journal:CommitIntent$'),
+        @('installed-state archive move', 'Fs-MoveNew:installed-state\.[0-9a-f]{64}\.json$'), @('installed-state Delete (move aside)', 'Fs-MoveNew:installed-state\.json\.T[0-9]+\.[0-9]{4}\.dengo\.old$'), @('installed-state Delete (displaced-file cleanup)', 'Fs-Delete:installed-state\.json\.T[0-9]+\.[0-9]{4}\.dengo\.old$'), @('CommitIntent', 'Journal:CommitIntent$'),
         @('uninstalled-state replace', 'Fs-Replace:uninstalled-state\.json$'), @('Committed', 'Journal:Committed$'), @('uninstalling.json delete', 'Fs-Delete:uninstalling\.json$'), @('transaction history move', 'Fs-MoveNew:txn-[^:]+\.committed\.jsonl$'))
     $gaps = Get-GBoundaryGaps $gLabels $gRequired
     [void](Assert-I2A 'GEN04-sweep-covers-every-required-boundary' ($gaps.Count -eq 0) ("each boundary has a point before and after the primitive among $gMut mutating points" + $(if ($gaps.Count -gt 0) { ': missing ' + ($gaps -join '; ') } else { '' })))

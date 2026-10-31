@@ -44,6 +44,7 @@ $CreateDesktopShortcut = [bool]$cfg.Shortcut; $ShortcutPathOverride = [string]$c
 $TestRoot = ''; $SkipBveIntegration = $false; $AdditionalSearch = $false; $ReplaceModifiedPCSX2Profile = $false; $ReplaceModifiedRPCS3Profile = $true
 $interruptedInstallDetected = $false; $bveExCurrentInstalled = $false; $bveExLegacyInstalled = $false; $outputRoot = 'unused'
 $detected = [object[]]@()
+$pcsx2Group = [pscustomobject]@{ Status = 'None'; SelectedRoot = ''; Roots = [string[]]@(); Detected = [object[]]@() }   # I3: set by the detection part of the engine (not run here); the result object reports it as Pcsx2Resolution
 $plan = [object[]]@($cfg.Plan)
 __GLUE__
 [System.IO.File]::WriteAllText($OutFile, ($result | ConvertTo-Json -Depth 9), (New-Object System.Text.UTF8Encoding($false)))
@@ -108,18 +109,37 @@ try {
             [void](Assert-I2A 'G1-existing-json-fields-kept' ($missing.Count -eq 0) ('missing: ' + ($missing -join ',')))
             [void](Assert-I2A 'G1-additive-json-fields' (($names -contains 'Transaction') -and ($names -contains 'Recovery') -and ($names -contains 'DeferredItems')) ('fields: Transaction, Recovery, DeferredItems'))
             [void](Assert-I2A 'G1-succeeded' (($j.Succeeded -eq $true) -and ($j.ErrorCode -eq '') -and ($j.Transaction.StateCommitted -eq $true) -and ($j.Transaction.LockAcquired -eq $true) -and ($j.Recovery.Outcome -eq 'NotNeeded')) "Succeeded=$($j.Succeeded) code=[$($j.ErrorCode)] tx=$($j.Transaction.TransactionId)")
+            # I3-D follow-up: PCSX2 is not deferred any more. No Deferred row exists, DeferredItems is still a (now empty) field, and the two PCSX2 rows carry exactly the Action the plan gave them.
             $deferred = @($j.ApplyResults | Where-Object { $_.Action -eq 'Deferred' })
-            [void](Assert-I2A 'G1-pcsx2-deferred-in-apply-results' (($deferred.Count -eq 2) -and ($j.DeferredItems.Count -eq 2) -and (@($j.ApplyResults | Where-Object { $_.Platform -eq 'Core' -and $_.Component -eq 'Application' }).Count -eq 1)) "deferred rows=$($deferred.Count); one Core/Application row")
+            $pcsx2Rows = @($j.ApplyResults | Where-Object { $_.Platform -eq 'PCSX2' })
+            $pcsx2PlanItems = @($plan | Where-Object { $_.Platform -eq 'PCSX2' })
+            $pcsx2ActionMismatch = @($pcsx2PlanItems | Where-Object { $pi = $_; @($pcsx2Rows | Where-Object { ($_.Component -eq $pi.Component) -and ($_.Action -eq $pi.Action) }).Count -ne 1 })
+            [void](Assert-I2A 'G1-pcsx2-deferred-in-apply-results' (($deferred.Count -eq 0) -and ($j.DeferredItems.Count -eq 0) -and ($names -contains 'DeferredItems') -and ($pcsx2PlanItems.Count -eq 2) -and ($pcsx2Rows.Count -eq 2) -and ($pcsx2ActionMismatch.Count -eq 0) -and (@($j.ApplyResults | Where-Object { $_.Platform -eq 'Core' -and $_.Component -eq 'Application' }).Count -eq 1)) "deferred rows=$($deferred.Count); PCSX2 rows=$($pcsx2Rows.Count) (plan items $($pcsx2PlanItems.Count), Action mismatches $($pcsx2ActionMismatch.Count)); one Core/Application row")
             [void](Assert-I2A 'G1-shortcut-and-backup-fields' (($j.ShortcutRequested -eq $true) -and ($j.ShortcutCreated -eq $true) -and ($j.ShortcutPath -eq $scPath) -and ([System.IO.File]::Exists($scPath)) -and ($j.BackupRoot -like '*InstallerBackups*')) "shortcut=$($j.ShortcutCreated) path=$($j.ShortcutPath) backupRoot=$($j.BackupRoot)")
             $stateOk = $false; $stateObj = $null
             if ([System.IO.File]::Exists($L.Product.StatePath)) { $stateObj = [System.IO.File]::ReadAllText($L.Product.StatePath, [System.Text.Encoding]::UTF8) | ConvertFrom-Json; $stateOk = (($stateObj.SchemaVersion -eq 1) -and ($stateObj.StateRevision -eq 2) -and ($stateObj.TransactionId -eq $j.Transaction.TransactionId)) }
             # the exact conditions the GUI checks for a committed install (DenGoInstallerGui.ps1 Test-ApplyCommitted)
             $guiOk = ($stateOk -and (-not [System.IO.File]::Exists((Join-Path $L.Product.StateRoot 'installing.json'))) -and ([System.DateTimeOffset]::Parse([string]$stateObj.InstalledAt, [System.Globalization.CultureInfo]::InvariantCulture) -ge [System.DateTimeOffset]::Parse([string]$j.Generated, [System.Globalization.CultureInfo]::InvariantCulture).AddMinutes(-5)))
             [void](Assert-I2A 'G1-state-satisfies-the-gui-commit-check' $guiOk 'SchemaVersion 1, StateRevision 2, no marker, InstalledAt set')
+            # I3-D follow-up (replaces what "PCSX2 is deferred" used to say about the state): the PCSX2 records are real. The LilyPad.ini that was overwritten has its Origin (the pre-write measurement) in
+            # Backups[0] and in the record; the .lily was new and has no Origin; nothing was closed.
+            $pcsx2Recs = $(if ($null -ne $stateObj) { @($stateObj.Files | Where-Object { $_.Platform -eq 'PCSX2' }) } else { @() })
+            $lilyRec = @($pcsx2Recs | Where-Object { $_.Component -eq 'EffectiveInputProfile' }); $dotLilyRec = @($pcsx2Recs | Where-Object { $_.Component -eq 'InputProfile' })
+            $originOk = $false; $detail = 'no state'
+            if (($lilyRec.Count -eq 1) -and ($dotLilyRec.Count -eq 1)) {
+                $lr = $lilyRec[0]; $b0 = @($lr.Backups)
+                $originOk = (($lr.Ownership -eq 'ReplacedExisting') -and ($lr.ExistedBefore -eq $true) -and ($b0.Count -eq 1) -and ([string]$lr.Backup -ceq [string]$b0[0].Path) -and ([string]$lr.BeforeSHA256 -ceq [string]$b0[0].SHA256) -and ([System.IO.File]::Exists([string]$b0[0].Path)) -and ((Get-I2AFileSha ([string]$b0[0].Path)) -ceq [string]$lr.BeforeSHA256) -and ([string]$b0[0].TransactionId -ceq [string]$j.Transaction.TransactionId) -and ($dotLilyRec[0].Ownership -eq 'CreatedByInstaller') -and ($dotLilyRec[0].ExistedBefore -eq $false) -and (@($dotLilyRec[0].Backups).Count -eq 0))
+                $detail = "LilyPad.ini: Ownership=$($lr.Ownership) Backups=$($b0.Count); .lily: Ownership=$($dotLilyRec[0].Ownership)"
+            }
+            [void](Assert-I2A 'G1-pcsx2-records-origin-and-backups' ($originOk -and (@($stateObj.ClosedRecords).Count -eq 0)) "$detail; ClosedRecords=$(@($stateObj.ClosedRecords).Count)")
         }
         $post = Get-GlueTree $L
         $changed = @(Compare-I2ATree $pre $post | Where-Object { $_ -notlike '*d:*' })
-        [void](Assert-I2A 'G1-pcsx2-files-untouched' (@(Compare-I2ATree $pre $post | Where-Object { $_ -match 'pcsx2' }).Count -eq 0) 'no PCSX2 / LilyPad file was created or changed')
+        # I3-D follow-up: the two fixed PCSX2 leaves (LilyPad.ini and the DenGo .lily) are written; no other file under the PCSX2 tree (PCSX2.ini, PCSX2_ui.ini, ...) is created, changed or removed
+        $pcsx2Changes = @(Compare-I2ATree $pre $post | Where-Object { $_ -match 'pcsx2' })
+        $pcsx2OtherChanges = @($pcsx2Changes | Where-Object { ($_ -notmatch 'lilypad\.ini') -and ($_ -notmatch 'denGo-controller-converter\.lily') })
+        $pcsx2LeafChanges = @($pcsx2Changes | Where-Object { ($_ -match 'lilypad\.ini') -or ($_ -match 'denGo-controller-converter\.lily') })
+        [void](Assert-I2A 'G1-pcsx2-files-untouched' (($pcsx2OtherChanges.Count -eq 0) -and ($pcsx2LeafChanges.Count -eq 2)) "changes under the PCSX2 tree: $($pcsx2Changes.Count) = $($pcsx2LeafChanges.Count) on the two fixed leaves + $($pcsx2OtherChanges.Count) elsewhere [$($pcsx2OtherChanges -join ' ; ')]")
     } finally { Remove-I2ASandbox $L.Root }
 
     # =================================================== G2 a REAL failure (read-only destination, no fault harness): everything is restored

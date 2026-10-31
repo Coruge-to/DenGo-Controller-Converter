@@ -28,13 +28,26 @@ try {
     $engine = [System.IO.File]::ReadAllText($enginePath,[System.Text.Encoding]::UTF8)
     $gui = [System.IO.File]::ReadAllText($guiPath,[System.Text.Encoding]::UTF8)
 
-    $legacyDetection = Get-IndexOrdinal $engine "inis\LilyPad.ini"
-    Add-TestResult 'PCSX2-L01' 'Legacy LilyPad detection remains' ($legacyDetection -ge 0) ('Index=' + [string]$legacyDetection)
+    $productPath = Join-Path $repo 'installer\scripts\DenGoInstallerProductApply.ps1'
+    $product = [System.IO.File]::ReadAllText($productPath,[System.Text.Encoding]::UTF8)
+    $productTokens = $null
+    $productErrors = $null
+    $productAst = [System.Management.Automation.Language.Parser]::ParseInput($product,[ref]$productTokens,[ref]$productErrors)
+    $productFunctions = @{}
+    foreach ($productFunction in @($productAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] },$true))) { $productFunctions[$productFunction.Name] = [string]$productFunction.Extent.Text }
+    $rootProof = [string]$productFunctions['Test-DenGoPcsx2RootProof']
+    $engineGroupCall = Get-IndexOrdinal $engine 'Group-DenGoPcsx2Candidates'
+    $legacyDetection = Get-IndexOrdinal $rootProof "'LilyPad.ini'"
+    $rootProofInis = Get-IndexOrdinal $rootProof "'inis'"
+    $rootProofUi = Get-IndexOrdinal $rootProof "'PCSX2_ui.ini'"
+    Add-TestResult 'PCSX2-L01' 'Legacy LilyPad root proof is made by the product layer from the engine candidates' ($engineGroupCall -ge 0 -and $legacyDetection -ge 0 -and $rootProofInis -ge 0 -and $rootProofUi -ge 0) (("EngineGroupCall={0};ProofLilyPad={1};ProofInis={2};ProofUi={3}" -f $engineGroupCall,$legacyDetection,$rootProofInis,$rootProofUi))
 
-    $currentIni = Get-IndexOrdinal $engine "inis\PCSX2.ini"
-    $currentInputSources = Get-IndexOrdinal $engine '[InputSources]'
-    $currentPad1 = Get-IndexOrdinal $engine '[Pad1]'
-    Add-TestResult 'PCSX2-C01' 'Current PCSX2.ini detection exists' ($currentIni -ge 0 -and $currentInputSources -ge 0 -and $currentPad1 -ge 0) (("Ini={0};InputSources={1};Pad1={2}" -f $currentIni,$currentInputSources,$currentPad1))
+    $settingsReaders = New-Object System.Collections.ArrayList
+    foreach ($scriptFile in (@(Get-ChildItem -LiteralPath (Join-Path $repo 'installer\scripts') -Filter '*.ps1') + @(Get-ChildItem -LiteralPath (Join-Path $repo 'installer\gui') -Filter '*.ps1'))) {
+        $scriptText = [System.IO.File]::ReadAllText($scriptFile.FullName,[System.Text.Encoding]::UTF8)
+        foreach ($needle in @('PCSX2.ini','[InputSources]','[Pad1]')) { if ((Get-IndexOrdinal $scriptText $needle) -ge 0) { [void]$settingsReaders.Add($scriptFile.Name + ':' + $needle) } }
+    }
+    Add-TestResult 'PCSX2-C01' 'No script reads PCSX2.ini (a current PCSX2 is told apart by its executable, never by its settings)' (@($settingsReaders).Count -eq 0) ('Readers=' + [string]::Join(',',[string[]]@($settingsReaders)))
 
     $qtExact = Get-IndexOrdinal $engine "pcsx2-qt.exe"
     $classicExact = Get-IndexOrdinal $engine "pcsx2.exe"
@@ -47,13 +60,17 @@ try {
     Add-TestResult 'PCSX2-C03' 'Exact PCSX2 names outrank fallback names' ($priorityNames -ge 0 -and $priorityCandidates -ge 0) (("Names={0};Candidates={1}" -f $priorityNames,$priorityCandidates))
     $uninstExclusion = Get-IndexOrdinal $engine '(uninst|installer|setup|update)'
     Add-TestResult 'PCSX2-C04' 'Installer uninstaller and updater names are excluded' ($uninstExclusion -ge 0) ('Index=' + [string]$uninstExclusion)
-      $unsupportedMode = Get-IndexOrdinal $engine "CurrentIntegrated"
-      $unsupportedStatus = Get-IndexOrdinal $engine "UnsupportedCurrent"
-      $supportedList = Get-IndexOrdinal $engine '$supportedPcsx2 = @($pcsx2 | Where-Object {'
-      Add-TestResult 'PCSX2-S01' 'Current PCSX2 is detected but unsupported' ($unsupportedMode -ge 0 -and $unsupportedStatus -ge 0) (("Mode={0};Status={1}" -f $unsupportedMode,$unsupportedStatus))
-      Add-TestResult 'PCSX2-S02' 'Only supported legacy PCSX2 enters the plan' ($supportedList -ge 0) ('Index=' + [string]$supportedList)
-      $message1 = Get-IndexOrdinal $gui 'PCSX2 ver1.7以降の新しい入力設定方式が検出されました'
-      $message2 = Get-IndexOrdinal $gui '正式対応しているPCSX2はver1.6.0です'
+      $groupFunction = [string]$productFunctions['Group-DenGoPcsx2Candidates']
+      $statusAssigned = @('UnsupportedCurrent','UnsupportedUnverified','Ambiguous','Supported') | Where-Object { (Get-IndexOrdinal $groupFunction ("'" + $_ + "'")) -lt 0 }
+      $statusInRow = Get-IndexOrdinal $engine 'SupportStatus=$supportStatus'
+      Add-TestResult 'PCSX2-S01' 'Current, unverified and ambiguous PCSX2 are detected but unsupported (the status comes from the classifier)' (@($statusAssigned).Count -eq 0 -and $statusInRow -ge 0) (("MissingStatus={0};RowStatus={1}" -f [string]::Join(',',[string[]]@($statusAssigned)),$statusInRow))
+      $planFunction = [string]$productFunctions['New-DenGoPcsx2PlanItems']
+      $engineResolvedOnly = Get-IndexOrdinal $engine '[string]$pcsx2Group.Status,''Resolved'''
+      $planResolvedOnly = Get-IndexOrdinal $planFunction "'Resolved'"
+      $planFromGroup = Get-IndexOrdinal $engine 'New-DenGoPcsx2PlanItems -Resolution $pcsx2Group'
+      Add-TestResult 'PCSX2-S02' 'Only a resolved, supported PCSX2 enters the plan' ($engineResolvedOnly -ge 0 -and $planResolvedOnly -ge 0 -and $planFromGroup -ge 0) (("EngineResolved={0};PlanResolved={1};PlanFromGroup={2}" -f $engineResolvedOnly,$planResolvedOnly,$planFromGroup))
+      $message1 = Get-IndexOrdinal $gui '"検出したPCSX2は非対応`r`nPCSX2 1.6.0対応"'
+      $message2 = Get-IndexOrdinal $gui 'PCSX2 1.6.0対応'
       $message3 = Get-IndexOrdinal $gui '検出したPCSX2には対応していません'
       $openText = Get-IndexOrdinal $gui '配布ページを開く'
       $skipText = Get-IndexOrdinal $gui '設定をスキップ'
@@ -64,6 +81,13 @@ try {
       Add-TestResult 'GUI-PCSX2-03' 'Unsupported PCSX2 preview exists' ($unsupportedPreview -ge 0) ('Index=' + [string]$unsupportedPreview)
       $normalUnsupportedCall = Get-IndexOrdinal $gui 'if(-not$script:unsupportedPCSX2Shown-and(Has-UnsupportedCurrentPCSX2))'
       Add-TestResult 'GUI-PCSX2-04' 'Unsupported PCSX2 dialog is connected to normal detection flow' ($normalUnsupportedCall -ge 0) ('Index=' + [string]$normalUnsupportedCall)
+      $uninstallerGui = [System.IO.File]::ReadAllText((Join-Path $repo 'installer\gui\DenGoUninstallerGui.ps1'),[System.Text.Encoding]::UTF8)
+      $guessedVersionWords = @('ver1.7','1.7','2.x','ver2','以降')
+      $guessedHits = New-Object System.Collections.ArrayList
+      foreach ($surface in @(@('Installer',$gui),@('Uninstaller',$uninstallerGui))) { foreach ($word in $guessedVersionWords) { if ((Get-IndexOrdinal ([string]$surface[1]) $word) -ge 0) { [void]$guessedHits.Add(([string]$surface[0] + ':' + $word)) } } }
+      $agreedWords = @('PCSX2 1.6.0対応','検出したPCSX2は非対応','版を確認できないため非対応','複数候補のため選択できない')
+      $missingWords = @($agreedWords | Where-Object { (Get-IndexOrdinal $gui $_) -lt 0 })
+      Add-TestResult 'GUI-PCSX2-05' 'PCSX2 wording is the agreed contract and never names a guessed version' (@($guessedHits).Count -eq 0 -and @($missingWords).Count -eq 0) ('GuessedVersionWords=' + [string]::Join(',',[string[]]@($guessedHits)) + ';MissingAgreedWords=' + [string]@($missingWords).Count)
       $bveMissingMessage1 = Get-IndexOrdinal $gui 'BveEXが見つかりません'
       $bveMissingMessage2 = Get-IndexOrdinal $gui 'BveEXを導入してからセットアップを再実行するか、'
       $bveMissingMessage3 = Get-IndexOrdinal $gui '設定をスキップしてください'

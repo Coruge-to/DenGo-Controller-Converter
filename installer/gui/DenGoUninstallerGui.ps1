@@ -251,8 +251,7 @@ function Get-RunningProductNames {
         [string]::Equals([string]$_.Name,'BveTs.exe',[System.StringComparison]::OrdinalIgnoreCase) -or
         [string]::Equals([string]$_.Name,'rpcs3.exe',[System.StringComparison]::OrdinalIgnoreCase) -or
         [string]::Equals([string]$_.Name,'DenGoControllerConverter.exe',[System.StringComparison]::OrdinalIgnoreCase) -or
-        [string]::Equals([string]$_.Name,'pcsx2-qt.exe',[System.StringComparison]::OrdinalIgnoreCase) -or
-        [string]::Equals([string]$_.Name,'pcsx2.exe',[System.StringComparison]::OrdinalIgnoreCase)
+        ([string]$_.Name -match '(?i)\Apcsx2[^\\/]*[.]exe\z')
     })
     $products = New-Object System.Collections.ArrayList
     foreach ($process in $running) {
