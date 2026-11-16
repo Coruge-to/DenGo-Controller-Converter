@@ -8,8 +8,8 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 $stage = 'startup'
-$expectedZipSha = '9868997F47B87D874F2687E808275C7BAD1462F0E0AFF0EC610726EDFA21887D'
-$expectedSourceCommit = 'd8f5231a6b4fdffd804f5caf0c14756057a63e9a'
+$expectedZipSha = '0054F30A404B0FC1B9D94E1BE2488C92DE01EB3231B06B600897A291A1420083'
+$expectedSourceCommit = '21b1435d1aa72ebdcb2f2984293c3b81be6fe101'
 $workRoot = ''
 try {
     $report = New-Object System.Collections.ArrayList
