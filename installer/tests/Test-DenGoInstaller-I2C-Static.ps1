@@ -231,8 +231,12 @@ else {
     $curBuildLines = @((Get-CurrentText (Join-Path $repo 'installer\Build-DenGo-SetupExe-2.0.0.ps1')).Split("`n"))
     $removedBuild = @($baseBuild.Split("`n") | Where-Object { $curBuildLines -cnotcontains $_ })
     $allowedMoved = @('        remove_registration()', '        schedule_self_delete()', '        install_uninstaller(bundle_root)', '        register_uninstaller()')
-    $unexpectedBuild = @($removedBuild | Where-Object { $allowedMoved -cnotcontains $_ })
-    [void](Assert-I2A 'S6-i2d-build-only-adds-the-post-step-lock' (($unexpectedBuild.Count -eq 0) -and ($removedBuild.Count -le 4)) ("baseline lines no longer present: $($removedBuild.Count) (allowed: the 4 moved post-step calls); unexpected: $($unexpectedBuild.Count) [$($unexpectedBuild -join ' | ')]"))
+    # B-2 / G (P1): the two $expectedZipSha / $expectedSourceCommit pin lines may change value, but only to a well-formed value, and exactly one of each must exist in the current builder
+    $pinRe = '^\$expected(ZipSha|SourceCommit) = ''(?:[0-9A-F]{64}|[0-9a-f]{40})''\s*$'
+    $curPins = @($curBuildLines | Where-Object { $_ -cmatch $pinRe })
+    $pinsOk = ($curPins.Count -eq 2) -and (@($curPins | Where-Object { $_ -cmatch '^\$expectedZipSha = ''[0-9A-F]{64}''\s*$' }).Count -eq 1) -and (@($curPins | Where-Object { $_ -cmatch '^\$expectedSourceCommit = ''[0-9a-f]{40}''\s*$' }).Count -eq 1)
+    $unexpectedBuild = @($removedBuild | Where-Object { ($allowedMoved -cnotcontains $_) -and ($_ -cnotmatch $pinRe) })
+    [void](Assert-I2A 'S6-i2d-build-only-adds-the-post-step-lock' (($unexpectedBuild.Count -eq 0) -and $pinsOk -and ($removedBuild.Count -le 6)) ("baseline lines no longer present: $($removedBuild.Count) (allowed: the 4 moved post-step calls and the 2 well-formed pin lines; pins ok: $pinsOk); unexpected: $($unexpectedBuild.Count) [$($unexpectedBuild -join ' | ')]"))
 }
 
 # ---------------------------------------------------------------- S7 the GUI change is local (the residual notice only)
