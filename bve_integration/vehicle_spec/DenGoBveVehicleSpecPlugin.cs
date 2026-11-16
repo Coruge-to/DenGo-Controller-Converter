@@ -6,6 +6,7 @@ using System.Threading;
 using BveEx.PluginHost;
 using BveEx.PluginHost.Plugins;
 using BveEx.PluginHost.Plugins.Extensions;
+using DenGoVehicleSpecShared;
 
 namespace DenGoBveVehicleSpec
 {
@@ -28,15 +29,26 @@ namespace DenGoBveVehicleSpec
         private EventWaitHandle ready;
         private int lastReadyPoll;
         private bool controlEnabled;
+        private readonly StallPulse pulse;
+        private bool hookTried;
 
         public DenGoBveVehicleSpecPlugin(PluginBuilder builder) : base(builder)
         {
+            pulse = new StallPulse(RefreshSnapshot);
             mapping = MemoryMappedFile.CreateOrOpen(MappingName, MappingSize, MemoryMappedFileAccess.ReadWrite);
             view = mapping.CreateViewAccessor(0, MappingSize, MemoryMappedFileAccess.ReadWrite);
             PublishInvalid();
         }
 
         public override void Tick(TimeSpan elapsed)
+        {
+            pulse.NoteTick();
+            StartPulseAndHook();
+            RefreshSnapshot();
+        }
+
+        // Runs on the BVE UI thread: from Tick, and from the stall pulse while Tick is not called (Pause).
+        private void RefreshSnapshot()
         {
             try
             {
@@ -80,10 +92,34 @@ namespace DenGoBveVehicleSpec
             }
         }
 
+        // First Tick only: capture the UI SynchronizationContext for the stall pulse and install the vehicle-reset counter.
+        private void StartPulseAndHook()
+        {
+            try
+            {
+                pulse.Start();
+                if (!hookTried)
+                {
+                    hookTried = true;
+                    ResetHook.Install(BveHacker, PublishResetCount);
+                }
+            }
+            catch { }
+        }
+
+        // Called from the Harmony Postfix (BVE main thread) right after Vehicle.Initialize; writes only the 8-byte counter field.
+        private void PublishResetCount(long count)
+        {
+            if (disposed) return;
+            try { view.Write(48, count); } catch { }
+        }
+
         public override void Dispose()
         {
             if (disposed) return;
             disposed = true;
+            pulse.Stop();
+            ResetHook.Uninstall();
             PublishInvalidNoThrow();
             if (ready != null) ready.Dispose();
             view.Dispose();
@@ -196,7 +232,7 @@ namespace DenGoBveVehicleSpec
             view.Write(32, holding ? 1 : 0);
             view.Write(36, DateTime.UtcNow.Ticks);
             view.Write(44, System.Diagnostics.Process.GetCurrentProcess().Id);
-            view.Write(48, 0L);
+            view.Write(48, ResetHook.Count);
             view.Write(56, enabled ? 1 : 0);
             view.Write(60, even);
             view.Write(0, even);

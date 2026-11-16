@@ -21,3 +21,13 @@ Public artifacts must use Coruge-to as the provider name.
 ## AtsEX legacy compatibility
 
 AtsEX legacy compatibility, verification results, and the TS Scoring handoff boundary are documented in `docs/legacy-compatibility.md`.
+
+## Handle resync after a BVE vehicle reset
+
+When BVE itself resets the vehicle (station jump, scenario reload, F5) the handle is set to its initial value and no longer matches the physical controller. The VehicleSpec plugins count these resets and the Caller re-sends the controller's current value once.
+
+- `shared/ResetHook.cs` (linked into both VehicleSpec plugins): a Harmony Postfix on the BVE-internal `Vehicle.Initialize(BrakePosition)` increments a counter, which the plugin publishes as an 8-byte value in the previously reserved field at offset 48 of the `Local\CorugeTo.DenGo.VehicleSpec.v1` mapping (schema version unchanged; Python ignores the field). All references to 0Harmony are confined to one nested class; if 0Harmony or the BVE method cannot be resolved a single `RESET_HOOK disabled reason=...` line is written to `DenGoControllerConverter.log` and the product behaves as before.
+- `shared/StallPulse.cs`: while the extension Tick is stalled (Pause) for 80 ms or more, a 16 ms pulse posts a read-only snapshot refresh to the UI thread so the Caller/Python keep trusting the snapshot and a reset during Pause is re-sent immediately.
+- `caller/CallerInputDevice.cs`: reads the counter from the VehicleSpec mapping on every Tick (level-triggered; the publisher process id must match), and when it changed bypasses the same-value suppression for exactly one send (`LEVER_MOVED ... resync=vehicle-reset`). The request is kept until a send really happens.
+- Build: both plugin projects reference the host's `0Harmony.dll` (`lib\0Harmony.dll`, local and untracked like the other `lib` references; `Private=False`): BveEX 2.0 `0Harmony 2.3.3` for the Current plugin, AtsEX/BveEX Legacy `0Harmony 2.2.2` for the Legacy plugin. The runtime uses the copy bundled with the host.
+- Evidence: observer and prototype runs in `DenGo-Claude-Handoff\bve-handle-resync-harmony-probe-v3` (findings and design-H documents).

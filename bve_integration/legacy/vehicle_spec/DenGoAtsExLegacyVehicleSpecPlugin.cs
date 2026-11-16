@@ -6,6 +6,7 @@ using System.Threading;
 using AtsEx.PluginHost;
 using AtsEx.PluginHost.Plugins;
 using AtsEx.PluginHost.Plugins.Extensions;
+using DenGoVehicleSpecShared;
 
 namespace DenGoAtsExLegacyVehicleSpec
 {
@@ -27,9 +28,12 @@ namespace DenGoAtsExLegacyVehicleSpec
         private EventWaitHandle ready;
         private int lastReadyPoll;
         private bool controlEnabled;
+        private readonly StallPulse pulse;
+        private bool hookTried;
 
         public DenGoAtsExLegacyVehicleSpecPlugin(PluginBuilder builder) : base(builder)
         {
+            pulse = new StallPulse(RefreshSnapshot);
             mapping = MemoryMappedFile.CreateOrOpen(MappingName, MappingSize, MemoryMappedFileAccess.ReadWrite);
             view = mapping.CreateViewAccessor(0, MappingSize, MemoryMappedFileAccess.ReadWrite);
             PublishInvalid();
@@ -37,19 +41,28 @@ namespace DenGoAtsExLegacyVehicleSpec
 
         public override TickResult Tick(TimeSpan elapsed)
         {
+            pulse.NoteTick();
+            StartPulseAndHook();
+            RefreshSnapshot();
+            return new ExtensionTickResult();
+        }
+
+        // Runs on the BVE UI thread: from Tick, and from the stall pulse while Tick is not called (Pause).
+        private void RefreshSnapshot()
+        {
             try
             {
                 UpdateControlState();
                 if (!controlEnabled)
                 {
                     PublishRaw(false, BrakeSystemKind.Unknown, 0, 0, false, false);
-                    return new ExtensionTickResult();
+                    return;
                 }
                 if (!BveHacker.IsScenarioCreated)
                 {
                     if (currentScenario != null) { currentScenario = null; generation++; }
                     PublishInvalid();
-                    return new ExtensionTickResult();
+                    return;
                 }
                 object scenario = BveHacker.Scenario;
                 if (!object.ReferenceEquals(currentScenario, scenario)) { currentScenario = scenario; generation++; }
@@ -57,13 +70,36 @@ namespace DenGoAtsExLegacyVehicleSpec
                 if (TryReadVehicleSpec(scenario, out spec)) Publish(spec); else PublishInvalid();
             }
             catch { PublishInvalidNoThrow(); }
-            return new ExtensionTickResult();
+        }
+
+        // First Tick only: capture the UI SynchronizationContext for the stall pulse and install the vehicle-reset counter.
+        private void StartPulseAndHook()
+        {
+            try
+            {
+                pulse.Start();
+                if (!hookTried)
+                {
+                    hookTried = true;
+                    ResetHook.Install(BveHacker, PublishResetCount);
+                }
+            }
+            catch { }
+        }
+
+        // Called from the Harmony Postfix (BVE main thread) right after Vehicle.Initialize; writes only the 8-byte counter field.
+        private void PublishResetCount(long count)
+        {
+            if (disposed) return;
+            try { view.Write(48, count); } catch { }
         }
 
         public override void Dispose()
         {
             if (disposed) return;
             disposed = true;
+            pulse.Stop();
+            ResetHook.Uninstall();
             PublishInvalidNoThrow();
             if (ready != null) ready.Dispose();
             view.Dispose();
@@ -122,7 +158,7 @@ namespace DenGoAtsExLegacyVehicleSpec
         private void PublishRaw(bool valid, BrakeSystemKind kind, int power, int brake, bool holding, bool enabled)
         {
             int odd = NextOddSequence(); int even = odd + 1;
-            view.Write(0, odd); view.Write(60, odd); view.Write(4, Magic); view.Write(8, SchemaVersion); view.Write(12, valid ? 1 : 0); view.Write(16, generation); view.Write(20, (int)kind); view.Write(24, power); view.Write(28, brake); view.Write(32, holding ? 1 : 0); view.Write(36, DateTime.UtcNow.Ticks); view.Write(44, Process.GetCurrentProcess().Id); view.Write(48, 0L); view.Write(56, enabled ? 1 : 0); view.Write(60, even); view.Write(0, even); view.Flush(); sequence = even;
+            view.Write(0, odd); view.Write(60, odd); view.Write(4, Magic); view.Write(8, SchemaVersion); view.Write(12, valid ? 1 : 0); view.Write(16, generation); view.Write(20, (int)kind); view.Write(24, power); view.Write(28, brake); view.Write(32, holding ? 1 : 0); view.Write(36, DateTime.UtcNow.Ticks); view.Write(44, Process.GetCurrentProcess().Id); view.Write(48, ResetHook.Count); view.Write(56, enabled ? 1 : 0); view.Write(60, even); view.Write(0, even); view.Flush(); sequence = even;
         }
         private void UpdateControlState()
         {

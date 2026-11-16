@@ -23,6 +23,12 @@ namespace CorugeTo.DenGo.ControllerConverter
     {
         private const string MappingName = @"Local\CorugeTo.DenGo.HandleCommand.v1";
         private const int MappingSize = 64;
+        // VehicleSpec mapping written by the BVE plugins (read-only here): only the vehicle-reset counter is used (8 bytes at offset 48).
+        private const string SpecMappingName = @"Local\CorugeTo.DenGo.VehicleSpec.v1";
+        private const int SpecMagic = 0x44564753;
+        private const int SpecSchemaVersion = 2;
+        private const int SpecProcessIdOffset = 44;
+        private const int SpecResetCounterOffset = 48;
         private const int Magic = 0x44474843;
         private const int SchemaVersion = 2;
         private const uint FileMapRead = 0x0004;
@@ -70,6 +76,9 @@ namespace CorugeTo.DenGo.ControllerConverter
         private bool hasLastValue;
         private int lastValue;
         private int lastGeneration = -1;
+        private bool resetCounterKnown;
+        private long lastResetCounter;
+        private bool pendingResync;
         private int pressedButtonMask;
         private string lastStatus;
 
@@ -146,6 +155,7 @@ namespace CorugeTo.DenGo.ControllerConverter
             {
                 return;
             }
+            PollResetCounter();
             if (!axis3Available)
             {
                 ReleasePressedButtons();
@@ -155,7 +165,7 @@ namespace CorugeTo.DenGo.ControllerConverter
 
             byte[] data;
             string readStatus;
-            if (!TryReadMapping(out data, out readStatus))
+            if (!TryReadMapping(MappingName, out data, out readStatus))
             {
                 ReleasePressedButtons();
                 LogStatus("WAIT mapping_" + readStatus);
@@ -206,7 +216,9 @@ namespace CorugeTo.DenGo.ControllerConverter
             ApplyButtonMask(snapshot.ButtonMask, snapshot.Sequence, snapshot.Generation);
 
             int outputValue = Math.Max(axis3Minimum, Math.Min(axis3Maximum, requestedValue));
-            if (hasLastValue && outputValue == lastValue)
+            // After BVE reset the vehicle itself (station jump / scenario reload / F5) the handle is no longer where the controller is:
+            // send the current value once even though it equals the last one. The request stays pending until a send really happens.
+            if (hasLastValue && outputValue == lastValue && !pendingResync)
             {
                 LogStatus("READY unchanged value=" + outputValue);
                 return;
@@ -219,6 +231,8 @@ namespace CorugeTo.DenGo.ControllerConverter
                 return;
             }
 
+            bool resync = pendingResync;
+            pendingResync = false;
             handler(this, new InputEventArgs(AxisSHandle, outputValue));
             lastValue = outputValue;
             hasLastValue = true;
@@ -230,7 +244,33 @@ namespace CorugeTo.DenGo.ControllerConverter
                 " maximum=" + axis3Maximum +
                 " sequence=" + snapshot.Sequence +
                 " generation=" + snapshot.Generation +
-                " brakeMode=" + snapshot.BrakeMode);
+                " brakeMode=" + snapshot.BrakeMode +
+                (resync ? " resync=vehicle-reset" : String.Empty));
+        }
+
+        // Level-triggered: compares the plugin's vehicle-reset counter with the last value seen on every Tick (also while the snapshot is not
+        // usable), so a reset that happens during Pause or scenario loading is still honoured by the first send afterwards.
+        private void PollResetCounter()
+        {
+            byte[] data;
+            string status;
+            if (!TryReadMapping(SpecMappingName, out data, out status)) return;
+            int sequenceStart = BitConverter.ToInt32(data, 0);
+            int sequenceEnd = BitConverter.ToInt32(data, 60);
+            if (sequenceStart != sequenceEnd || (sequenceStart & 1) != 0) return;
+            if (BitConverter.ToInt32(data, 4) != SpecMagic || BitConverter.ToInt32(data, 8) != SpecSchemaVersion) return;
+            if (BitConverter.ToInt32(data, SpecProcessIdOffset) != bveProcessId) return;
+            long counter = BitConverter.ToInt64(data, SpecResetCounterOffset);
+            if (!resetCounterKnown)
+            {
+                resetCounterKnown = true;
+                lastResetCounter = counter;
+                return;
+            }
+            if (counter == lastResetCounter) return;
+            lastResetCounter = counter;
+            pendingResync = true;
+            WriteLog("VEHICLE_RESET counter=" + counter);
         }
 
         public void Dispose()
@@ -596,11 +636,11 @@ namespace CorugeTo.DenGo.ControllerConverter
             return builder.ToString();
         }
 
-        private static bool TryReadMapping(out byte[] data, out string status)
+        private static bool TryReadMapping(string name, out byte[] data, out string status)
         {
             data = null;
             status = "unknown";
-            IntPtr mapping = OpenFileMapping(FileMapRead, false, MappingName);
+            IntPtr mapping = OpenFileMapping(FileMapRead, false, name);
             if (mapping == IntPtr.Zero)
             {
                 status = "not_found error=" + Marshal.GetLastWin32Error();
