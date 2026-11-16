@@ -156,6 +156,8 @@ else {
     [void](Assert-I2A ('S6-unchanged-' + $relGui) ((($chg.Changed -join ',') -ceq (($guiAllowedChanged | Sort-Object) -join ',')) -and (($chg.New -join ',') -ceq ($guiAllowedNew -join ',')) -and ($chg.Removed.Count -eq 0) -and $outsideSame) ("changed: $($chg.Changed -join ','); new: $($chg.New -join ','); removed: $($chg.Removed -join ','); everything outside them identical to the I2-B commit: $outsideSame"))
 }
 # engine: only Get-RunningTargetProducts (the process-name rule) is a function change; the rest of the PCSX2 integration is script-body code, so every added or removed LINE must be about PCSX2 / its detection / its plan
+# I3-H (owner-approved 2026-11-16, I3-E finding): the -AdditionalSearch fixed-drive search Add-FixedDriveExecutables was rewritten (breadth first, depth 5, no reparse points, 60 s cap) and the one call line passes 60 instead of 120.
+# That function is carved out of the line comparison and its own contract is the I3-Search suite; the call line is the single other allowed non-PCSX2 line.
 $relEng = 'installer/scripts/Invoke-DenGoInstaller.ps1'
 $baseE = Get-BaselineText $relEng
 if ($null -eq $baseE) { [void](Assert-I2A ('S6-unchanged-' + $relEng) $true 'baseline unavailable; skipped') }
@@ -163,10 +165,11 @@ else {
     $curE = Get-CurrentText (Join-Path $repo $relEng.Replace('/', '\'))
     $chg = Get-FunctionSetChange $baseE $curE
     $engineLine = '(?i)pcsx2|portable|LilyPad|legacyIni|currentIni|currentText|configurationRoot|dedicatedProfileName|activeProfileSource|DetectedButNotInitialized|groupEntry|supportStatus|detectedRow|detected\.Add|effectiveInputProfile|profileDirectory|DenGoUninstallerProductApply|closedGeneration|CurrentIntegrated|\$detected = New-Object|planBackupRoot|^\s*# read only\. An unreadable state|^\$transactionInfo = \$null;\$recoveryInfo = \$null;\$deferredItems = \[object\[\]\]@\(\)$|^\s*\}\s*$|^\s*\}\s*(else|elseif)\b|^\s*$'
-    $lb0 = $baseE.Split("`n"); $la0 = $curE.Split("`n")
+    $searchFns = @('Add-FixedDriveExecutables'); $searchCall = '^\s*if \(\$AdditionalSearch\) \{ Add-FixedDriveExecutables \$candidates (60|120) \}\s*$'
+    $lb0 = (Get-TextWithoutFunctions $baseE $searchFns).Split("`n"); $la0 = (Get-TextWithoutFunctions $curE $searchFns).Split("`n")
     $lostE = @($lb0 | Where-Object { $la0 -cnotcontains $_ }); $addedE = @($la0 | Where-Object { $lb0 -cnotcontains $_ })
-    $lostOther = @($lostE | Where-Object { $_ -notmatch $engineLine }); $addedOther = @($addedE | Where-Object { $_ -notmatch $engineLine })
-    [void](Assert-I2A ('S6-unchanged-' + $relEng) ((($chg.Changed -join ',') -ceq 'Get-RunningTargetProducts') -and ($chg.New.Count -eq 0) -and ($chg.Removed.Count -eq 0) -and ($lostOther.Count -eq 0) -and ($addedOther.Count -eq 0) -and ($lostE.Count -gt 0) -and ($addedE.Count -gt 0)) ("changed functions: $($chg.Changed -join ','); new: $($chg.New -join ','); removed: $($chg.Removed -join ','); lines removed $($lostE.Count) / added $($addedE.Count); not about PCSX2: removed $($lostOther.Count) / added $($addedOther.Count)"))
+    $lostOther = @($lostE | Where-Object { $_ -notmatch $engineLine -and $_ -notmatch $searchCall }); $addedOther = @($addedE | Where-Object { $_ -notmatch $engineLine -and $_ -notmatch $searchCall })
+    [void](Assert-I2A ('S6-unchanged-' + $relEng) ((($chg.Changed -join ',') -ceq 'Add-FixedDriveExecutables,Get-RunningTargetProducts') -and ($chg.New.Count -eq 0) -and ($chg.Removed.Count -eq 0) -and ($lostOther.Count -eq 0) -and ($addedOther.Count -eq 0) -and ($lostE.Count -gt 0) -and ($addedE.Count -gt 0)) ("changed functions: $($chg.Changed -join ','); new: $($chg.New -join ','); removed: $($chg.Removed -join ','); lines removed $($lostE.Count) / added $($addedE.Count); not about PCSX2: removed $($lostOther.Count) / added $($addedOther.Count)"))
 }
 # QA1: the I3 follow-up set (see Test-DenGoInstaller-I2B-Static.ps1 S12): every QA1 line outside the PROC-01 and PCSX2 assertions is still the I2-B commit's
 $relQa = 'installer/tests/Test-DenGoInstaller-QA1.ps1'

@@ -15,7 +15,7 @@ $script:I3PairPluginSha = '637DEF94C71ED72A9F04F1541FBFFE4AB63F866461157E80EE906
 $script:I3OtherExeSha = 'B2' * 32
 $script:I3OtherPluginSha = 'C3' * 32
 $script:I3ActiveSha = '7D2AE3223EB5CDA8C5048091370BA28B9D65C3EC2BC3421EF618A84EED161DE0'   # DenGo-LilyPad-Active.ini (asset; I3 never changes it)
-$script:I3LilySha = 'CD4993CAF9E4496A78A34F2FB590EB851057409128DB31A13ADA2ED0FA731795'     # DenGo-Controller-Converter.lily (asset)
+$script:I3LilySha = '7D2AE3223EB5CDA8C5048091370BA28B9D65C3EC2BC3421EF618A84EED161DE0'     # DenGo-Controller-Converter.lily (asset)
 $script:I3RealDocuments = [System.Environment]::GetFolderPath('MyDocuments')
 
 # Invokes a script block and never throws: { Ok; Value; Error }. A missing product function shows up as Ok = $false with the command-not-found text.
@@ -226,7 +226,8 @@ function Get-I3NewFileList {
         'installer/tests/I3.TestSupport.ps1', 'installer/tests/Test-DenGoInstaller-I3-Static.ps1', 'installer/tests/Test-DenGoInstaller-I3-Unit.ps1', 'installer/tests/Test-DenGoInstaller-I3-Zero.ps1',
         'installer/tests/Test-DenGoInstaller-I3-Gate.ps1', 'installer/tests/Test-DenGoInstaller-I3-Engine.ps1', 'installer/tests/Test-DenGoInstaller-I3-Uninstall.ps1',
         'installer/tests/Test-DenGoInstaller-I3-Gui.ps1', 'installer/tests/Test-DenGoInstaller-I3-All.ps1',
-        'installer/tests/Test-DenGoInstaller-I3-Fault.ps1', 'installer/tests/Test-DenGoInstaller-I3-Toctou.ps1')
+        'installer/tests/Test-DenGoInstaller-I3-Fault.ps1', 'installer/tests/Test-DenGoInstaller-I3-Toctou.ps1',
+        'installer/tests/Test-DenGoInstaller-I3-Search.ps1')
 }
 function Get-I3ProductFileList {
     return @(

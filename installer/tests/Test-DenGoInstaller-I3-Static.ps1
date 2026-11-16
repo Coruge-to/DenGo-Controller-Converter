@@ -73,7 +73,8 @@ $pins = @(
     @('installer/build/Build-DenGo-SetupPackage.ps1', 'B6715329A211F73CD9C3576169217AE80E6D9A408898DBDB79D98E4212EB6462'),
     @('installer/Build-DenGo-SetupExe-2.0.0.ps1', '01953FA179C83FEEA14B3CA6729CE488430BCCAE1D3628973FD261B1B70EC16D'),
     @('installer/assets/input-profiles/pcsx2/DenGo-LilyPad-Active.ini', '7D2AE3223EB5CDA8C5048091370BA28B9D65C3EC2BC3421EF618A84EED161DE0'),
-    @('installer/assets/input-profiles/pcsx2/DenGo-Controller-Converter.lily', 'CD4993CAF9E4496A78A34F2FB590EB851057409128DB31A13ADA2ED0FA731795'),
+    # I3-H (2026-11-16, I3-E finding R-5): the .lily profile is the Active profile content (Pad 1 = 26); the old asset (CD4993CA...) assigned only 17 and no XInput Pad 0 binding to Pad 1
+    @('installer/assets/input-profiles/pcsx2/DenGo-Controller-Converter.lily', '7D2AE3223EB5CDA8C5048091370BA28B9D65C3EC2BC3421EF618A84EED161DE0'),
     @('installer/assets/input-profiles/rpcs3/Den-Go-Controller.yml', 'AB560A5E27D462DE66C05C1552B70BC5011D50A9BF098778AF8AFE346288456D'))
 foreach ($p in $pins) {
     $abs = Join-Path $repo ($p[0].Replace('/', '\'))
@@ -157,6 +158,22 @@ $procFns = 0
 foreach ($n in 'Get-DenGoPcsx2Identity', 'Group-DenGoPcsx2Candidates', 'Resolve-DenGoPcsx2Root', 'Test-DenGoPcsx2RootProof', 'New-DenGoPcsx2PlanItems', 'Get-DenGoPcsx2KnownPairs') { if ($null -ne (Get-FunctionAst $pa.Ast $n)) { $procFns++ } }
 [void](Assert-I2A 'S-44-the-six-detection-functions-exist-once-in-ProductApply' ($procFns -eq 6) "found $procFns of 6")
 
+# ================================================================ S-45 the .lily profile and the Active profile assign the same Pad 1 bindings (I3-E R-5 finding: the old .lily gave 17, the Active profile 26)
+function Get-LilyPadPad1Counts([string]$Path) {
+    $dev = ''; $byDevice = @{}; $total = 0
+    foreach ($line in [System.IO.File]::ReadAllLines($Path)) {
+        if ($line -match '^Display Name=(.*)$') { $dev = $Matches[1].Trim(); continue }
+        if ($line -match '^Binding \d+=[^,]+,\s*\d+,\s*\d+,\s*-?\d+,\s*\d+,\s*\d+,\s*\d+,\s*\d+,\s*(\d+)\s*$') {
+            if ([int]$Matches[1] -eq 1) { $total++; if ($byDevice.ContainsKey($dev)) { $byDevice[$dev]++ } else { $byDevice[$dev] = 1 } }
+        }
+    }
+    return [pscustomobject]@{ Total = $total; ByDevice = $byDevice }
+}
+$lilyPath = Join-Path $repo 'installer\assets\input-profiles\pcsx2\DenGo-Controller-Converter.lily'
+$activePath = Join-Path $repo 'installer\assets\input-profiles\pcsx2\DenGo-LilyPad-Active.ini'
+$lilyPad1 = Get-LilyPadPad1Counts $lilyPath; $activePad1 = Get-LilyPadPad1Counts $activePath
+$lilyXi = $(if ($lilyPad1.ByDevice.ContainsKey('XInput Pad 0')) { $lilyPad1.ByDevice['XInput Pad 0'] } else { 0 })
+[void](Assert-I2A 'S-45-the-lily-profile-gives-Pad-1-the-same-26-bindings-as-the-Active-profile-including-XInput-Pad-0' (($activePad1.Total -eq 26) -and ($lilyPad1.Total -eq $activePad1.Total) -and ($lilyXi -ge 1)) ("Pad 1 bindings: lily=$($lilyPad1.Total) (XInput Pad 0: $lilyXi) active=$($activePad1.Total)"))
 # ================================================================ S-9x hygiene of the I3 test files
 $tests = Join-Path $repo 'installer\tests'
 $mine = @(Get-I3NewFileList | ForEach-Object { Join-Path $repo ($_.Replace('/', '\')) })

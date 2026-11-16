@@ -178,35 +178,53 @@ function Add-ShortcutRootExecutables {
 }
 
 function Add-FixedDriveExecutables {
-    param([System.Collections.ArrayList]$List,[int]$MaxSecondsPerDrive)
-    $drives = @([System.IO.DriveInfo]::GetDrives() | Where-Object { $_.DriveType -eq [System.IO.DriveType]::Fixed -and $_.IsReady })
-    foreach ($drive in $drives) {
-        $deadline = [System.Environment]::TickCount + ($MaxSecondsPerDrive * 1000)
-        $pending = New-Object System.Collections.ArrayList
-        [void]$pending.Add($drive.RootDirectory.FullName)
-        while (@($pending).Count -gt 0 -and [System.Environment]::TickCount -lt $deadline) {
-            $lastIndex = @($pending).Count - 1
-            $directory = [string]$pending[$lastIndex]
-            $pending.RemoveAt($lastIndex)
-            try {
-                foreach ($fileName in @('BveTs.exe','rpcs3.exe')) {
-                    $path = Join-Path $directory $fileName
-                    if ([System.IO.File]::Exists($path)) { Add-Executable $List (Get-Platform $fileName) $path ('AdditionalFixedDriveSearch:' + $drive.Name) '' }
+    # -AdditionalSearch: look for BVE / RPCS3 / PCSX2 outside the default places (a custom install location).
+    # Breadth first, so shallow (likely) locations are found before deep ones and the time cap cuts the deepest directories first.
+    # Depth limit MaxDepth (the root is depth 0); never enters a reparse point (junction / symlink: no cycles, no walk into another volume);
+    # skips system trees (the recycle bin, System Volume Information, WindowsApps, node_modules, .git anywhere; Windows, Recovery, PerfLogs and similar directly below a root).
+    # Roots: the search start points (default: the root of every ready fixed drive). A start point is a seam for the tests.
+    param([System.Collections.ArrayList]$List,[int]$MaxSecondsPerDrive,[string[]]$Roots = @(),[int]$MaxDepth = 5)
+    $startPoints = @($Roots | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if ($startPoints.Count -eq 0) {
+        $startPoints = @([System.IO.DriveInfo]::GetDrives() | Where-Object { $_.DriveType -eq [System.IO.DriveType]::Fixed -and $_.IsReady } | ForEach-Object { $_.RootDirectory.FullName })
+    }
+    $skipAnywhere = @('$Recycle.Bin','System Volume Information','WindowsApps','node_modules','.git')
+    $skipBelowRoot = @('Windows','Recovery','PerfLogs','$WinREAgent','$Windows.~BT','$Windows.~WS','Config.Msi')
+    foreach ($root in $startPoints) {
+        if (-not [System.IO.Directory]::Exists($root)) { continue }
+        $label = 'AdditionalFixedDriveSearch:' + [System.IO.Path]::GetPathRoot([System.IO.Path]::GetFullPath($root))
+        $clock = [System.Diagnostics.Stopwatch]::StartNew()
+        $level = @([System.IO.Path]::GetFullPath($root))
+        $depth = 0
+        while (@($level).Count -gt 0 -and $depth -le $MaxDepth -and $clock.Elapsed.TotalSeconds -lt $MaxSecondsPerDrive) {
+            $next = New-Object System.Collections.ArrayList
+            foreach ($directory in @($level)) {
+                if ($clock.Elapsed.TotalSeconds -ge $MaxSecondsPerDrive) { break }
+                try {
+                    foreach ($fileName in @('BveTs.exe','rpcs3.exe')) {
+                        $path = Join-Path $directory $fileName
+                        if ([System.IO.File]::Exists($path)) { Add-Executable $List (Get-Platform $fileName) $path $label '' }
+                    }
+                    foreach ($path in @([System.IO.Directory]::GetFiles($directory,'*pcsx2*.exe',[System.IO.SearchOption]::TopDirectoryOnly))) {
+                        if ([string]::Equals((Get-Platform ([System.IO.Path]::GetFileName($path))),'PCSX2',[System.StringComparison]::Ordinal)) { Add-Executable $List 'PCSX2' $path $label '' }
+                    }
+                    if ($depth -lt $MaxDepth) {
+                        foreach ($child in @([System.IO.Directory]::GetDirectories($directory))) {
+                            $name = [System.IO.Path]::GetFileName($child)
+                            if ($name -in $skipAnywhere) { continue }
+                            if ($depth -eq 0 -and $name -in $skipBelowRoot) { continue }
+                            if (([System.IO.File]::GetAttributes($child) -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
+                            [void]$next.Add($child)
+                        }
+                    }
+                } catch {
                 }
-                foreach ($path in @([System.IO.Directory]::GetFiles($directory,'*pcsx2*.exe',[System.IO.SearchOption]::TopDirectoryOnly))) {
-                    $name = [System.IO.Path]::GetFileName($path)
-                    if ($name -notmatch '(?i)(uninst|installer|setup|update)') { Add-Executable $List 'PCSX2' $path ('AdditionalFixedDriveSearch:' + $drive.Name) '' }
-                }
-                foreach ($child in @([System.IO.Directory]::GetDirectories($directory))) {
-                    $name = [System.IO.Path]::GetFileName($child)
-                    if ($name -notin @('$Recycle.Bin','System Volume Information','WindowsApps')) { [void]$pending.Add($child) }
-                }
-            } catch {
             }
+            $level = @($next)
+            $depth++
         }
     }
 }
-
 function Convert-ToSandboxDestination {
     param([string]$Destination,[string]$Root)
     $full = [System.IO.Path]::GetFullPath($Destination)
@@ -471,7 +489,7 @@ foreach ($root in $commonRoots) {
     }
 }
 
-if ($AdditionalSearch) { Add-FixedDriveExecutables $candidates 120 }
+if ($AdditionalSearch) { Add-FixedDriveExecutables $candidates 60 }
 
 $exactPCSX2Names = @('pcsx2-qt.exe','pcsx2.exe')
 $exactPCSX2Candidates = @($candidates | Where-Object {

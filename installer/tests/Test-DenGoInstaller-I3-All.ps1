@@ -49,7 +49,7 @@ function Invoke-Suite([string]$Name, [string]$Script, [string[]]$ExtraArgs = @()
     return [pscustomobject]@{ Name = $Name; ExitCode = $p.ExitCode; Pass = $pass; Fail = $fail; Ok = $ok; StartedUtc = $startedUtc; EndedUtc = $endedUtc; Seconds = [Math]::Round($sw.Elapsed.TotalSeconds, 1) }
 }
 $suites = @(@('I3-Static', 'Test-DenGoInstaller-I3-Static.ps1'), @('I3-Unit', 'Test-DenGoInstaller-I3-Unit.ps1'), @('I3-Zero', 'Test-DenGoInstaller-I3-Zero.ps1'), @('I3-Gate', 'Test-DenGoInstaller-I3-Gate.ps1'),
-    @('I3-Engine', 'Test-DenGoInstaller-I3-Engine.ps1'), @('I3-Uninstall', 'Test-DenGoInstaller-I3-Uninstall.ps1'))
+    @('I3-Engine', 'Test-DenGoInstaller-I3-Engine.ps1'), @('I3-Uninstall', 'Test-DenGoInstaller-I3-Uninstall.ps1'), @('I3-Search', 'Test-DenGoInstaller-I3-Search.ps1'))
 if (-not $SkipGui) { $suites += , @('I3-Gui', 'Test-DenGoInstaller-I3-Gui.ps1') }
 # the TOCTOU contract of the shared core as seen through the I3 world (contract mode; I2A.Toctou.TestSupport.ps1 is a helper, not a suite), and the I3 fault tests (formal F2 contract of the candidate grouping included)
 $suites += , @('I3-Toctou', 'Test-DenGoInstaller-I3-Toctou.ps1', @('-Contract'))

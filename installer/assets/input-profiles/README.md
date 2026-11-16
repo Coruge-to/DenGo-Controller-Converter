@@ -10,6 +10,7 @@ The installer/build directory is generated output and is not the source of truth
 - Do not replace LilyPad.ini as a whole.
 - Preserve a user-modified profile when its SHA-256 differs from the shipped profile.
 - Pad 1 contains verified keyboard and XInput mappings. Pad 2 is intentionally unassigned.
+- DenGo-Controller-Converter.lily carries the same Pad 1 bindings as DenGo-LilyPad-Active.ini (26 on Pad 1, including XInput Pad 0). Loading it with LilyPad's Load Bindings gives the same Pad 1 layout as the installed LilyPad.ini (checked on a real PC, 2026-11-16).
 
 ## RPCS3
 
