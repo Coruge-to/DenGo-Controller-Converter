@@ -28,6 +28,7 @@ from window_message_backend import WindowMessageBackend, WindowTarget
 from virtual_gamepad_backend import VirtualGamepadBackend
 from hidhide_pcsx2 import HidHidePcsx2Configurator
 from update_checker import CURRENT_VERSION, check_latest_release
+from display_diagnostics import DisplayDiagnostics, client_height
 
 try:
     myappid = 'my.dengo.converter.v21.ux_improved'
@@ -412,6 +413,16 @@ def main():
     bve_spec_receiver = BveVehicleSpecReceiver()
     bve_handle_publisher = BveHandleCommandPublisher()
     platform_detector = EfficientPlatformDetector(probe_interval=0.20, full_resync_interval=3.0)
+    # Opt-in diagnostics (environment variable DENGO_DIAG_LOG names the log file); a no-op when it is not set.
+    diag = DisplayDiagnostics.from_environment()
+    diag.open_note(version=CURRENT_VERSION)
+
+    def os_client_height():
+        try:
+            return client_height(pygame.display.get_wm_info().get("window"))
+        except Exception:
+            return None
+
     active_window_route = None
     input_was_enabled = False
     hidhide_configurator = HidHidePcsx2Configurator()
@@ -454,6 +465,7 @@ def main():
 
     running = True
     while running:
+        diag.tick()
         for event in get_pygame_events_safe():
             if event.type == pygame.QUIT:
                 running = False
@@ -463,6 +475,7 @@ def main():
                 except (AttributeError, pygame.error):
                     selected_removed = True
                 if selected_removed:
+                    diag.event("JOY", "selected controller removed")
                     window_backend.detach()
                     logics[game_mode].reset()
                     virtual_gamepad_backend.disconnect()
@@ -500,14 +513,17 @@ def main():
                 )
                 if answer == IDYES:
                     webbrowser.open(update_info.release_url)
-        platform_statuses=platform_detector.update()
+        with diag.section("platform_detector.update"):
+            platform_statuses=platform_detector.update()
         running_platforms=tuple(s for s in platform_statuses if s.running)
         platform_count=sum(len(s.process_ids) for s in running_platforms)
+        diag.note_platform_view(platform_statuses, platform_count)
         single_platform = next((s for s in running_platforms if len(s.process_ids) == 1), None) if platform_count == 1 else None
         mode_map = {"jrets":"JRETS","bve5":"BVE","bve6":"BVE","pcsx2":"PCSX2","rpcs3":"RPCS3","running_train":"RUNNING"}
         if single_platform is not None:
             desired_mode = mode_map[single_platform.platform_id]
             if desired_mode != game_mode:
+                diag.event("MODE", f"{game_mode} -> {desired_mode} (single platform {single_platform.platform_id})")
                 window_backend.detach()
                 logics[game_mode].reset()
                 active_window_route = None
@@ -552,12 +568,17 @@ def main():
         if virtual_gamepad_required:
             while running and not virtual_gamepad_backend.connected:
                 try:
-                    virtual_gamepad_backend.connect()
+                    diag.event("VIGEM", "connect (PCSX2 is the single platform)")
+                    with diag.section("vigem.connect"):
+                        virtual_gamepad_backend.connect()
                     pcsx2_paths = tuple(getattr(single_platform, "executable_paths", ()))
                     pcsx2_path = pcsx2_paths[0] if len(pcsx2_paths) == 1 else ""
-                    if pcsx2_path and hidhide_configurator.ensure_configured(pcsx2_path):
-                        virtual_gamepad_backend.disconnect()
-                        virtual_gamepad_backend.connect()
+                    with diag.section("hidhide.ensure_configured"):
+                        hidhide_changed = bool(pcsx2_path) and hidhide_configurator.ensure_configured(pcsx2_path)
+                    if hidhide_changed:
+                        with diag.section("vigem.reconnect"):
+                            virtual_gamepad_backend.disconnect()
+                            virtual_gamepad_backend.connect()
                 except RuntimeError as exc:
                     print(f"Virtual gamepad unavailable: {exc}", flush=True)
                     action = show_virtual_gamepad_unavailable(exc)
@@ -569,7 +590,9 @@ def main():
                 can_send_input = False
         else:
             if virtual_gamepad_backend.connected:
-                virtual_gamepad_backend.disconnect()
+                diag.event("VIGEM", "disconnect (PCSX2 is no longer the single platform)")
+                with diag.section("vigem.disconnect"):
+                    virtual_gamepad_backend.disconnect()
 
         input_was_enabled = can_send_input
         effective_brake_mode = brake_mode
@@ -688,8 +711,10 @@ def main():
         if current_visual_state != last_visual_state:
             # ★ 追加: ウィンドウの伸縮処理
             req_h = 260 if platform_count != 1 else get_dynamic_height(game_mode, effective_brake_mode, effective_max_power, effective_max_brake)
+            diag.note_resize(req_h, screen.get_height(), os_client_height)
             if screen.get_height() != req_h:
                 screen = pygame.display.set_mode((SCREEN_WIDTH, req_h))
+                diag.note_resized(os_client_height)
 
             screen.fill(COLOR_BG)
             pygame.draw.rect(screen, COLOR_HEADER_BG, (0, 0, SCREEN_WIDTH, header_h))
