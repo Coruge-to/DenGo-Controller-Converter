@@ -72,7 +72,7 @@ $pins = @(
     @('installer/scripts/Start-DenGoUninstall.ps1', '77F3FDC70235C9B41076CA7F34A84808A2C2814B4321A71BAA163310E4ED3829'),
     @('installer/build/Build-DenGo-SetupPackage.ps1', 'B6715329A211F73CD9C3576169217AE80E6D9A408898DBDB79D98E4212EB6462'),
     # B-2 / Y (2026-11-17): the builder differs from the I3 value ONLY in the two pin lines (expectedZipSha, expectedSourceCommit); this is the value after that update (git diff X Y on the builder = 2 lines)
-    @('installer/Build-DenGo-SetupExe-2.0.0.ps1', 'A4A6F46B7A19EFF271EFC2F779298DC919332C16F655414207CBF58B3D943DB7'),
+    @('installer/Build-DenGo-SetupExe-2.0.0.ps1', 'AB2B6B2797B40F65649844E39AA8583AD1A5C2BF718CC660A323F9D700098E4E'),
     @('installer/assets/input-profiles/pcsx2/DenGo-LilyPad-Active.ini', '7D2AE3223EB5CDA8C5048091370BA28B9D65C3EC2BC3421EF618A84EED161DE0'),
     # I3-H (2026-11-16, I3-E finding R-5): the .lily profile is the Active profile content (Pad 1 = 26); the old asset (CD4993CA...) assigned only 17 and no XInput Pad 0 binding to Pad 1
     @('installer/assets/input-profiles/pcsx2/DenGo-Controller-Converter.lily', '7D2AE3223EB5CDA8C5048091370BA28B9D65C3EC2BC3421EF618A84EED161DE0'),
