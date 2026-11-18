@@ -28,7 +28,7 @@ from window_message_backend import WindowMessageBackend, WindowTarget
 from virtual_gamepad_backend import VirtualGamepadBackend
 from hidhide_pcsx2 import HidHidePcsx2Configurator
 from update_checker import CURRENT_VERSION, check_latest_release
-from display_diagnostics import DisplayDiagnostics, client_height
+from display_diagnostics import DisplayDiagnostics, client_height, process_dpi_awareness
 
 try:
     myappid = 'my.dengo.converter.v21.ux_improved'
@@ -250,11 +250,13 @@ def find_compatible_controller():
     return compatible[0] if compatible else None
 
 
-def wait_for_compatible_controller():
+def wait_for_compatible_controller(diag=None):
     while True:
         joy = find_compatible_controller()
         if joy is not None:
             return joy
+        if diag is not None:
+            diag.event("DIALOG", "controller-not-found dialog shown")
         answer = ctypes.windll.user32.MessageBoxW(
             None,
             "対応する電GOコントローラーが見つかりませんでした。\n\n"
@@ -262,6 +264,8 @@ def wait_for_compatible_controller():
             "DenGo Controller Converter",
             MB_RETRYCANCEL | MB_ICONWARNING | MB_SETFOREGROUND,
         )
+        if diag is not None:
+            diag.event("DIALOG", "controller-not-found dialog answered=%s" % answer)
         if answer != IDRETRY:
             return None
 
@@ -375,6 +379,18 @@ def show_virtual_gamepad_unavailable(exc):
         return selected_button.value
 
 def main():
+    # Opt-in diagnostics (environment variable DENGO_DIAG_LOG names the log file); a no-op when it is not set.
+    # Created first so that the controller-not-found dialog and the window / monitor DPI changes are covered too.
+    diag = DisplayDiagnostics.from_environment()
+    diag.open_note(version=CURRENT_VERSION, dpi_awareness=process_dpi_awareness())
+    diag.start_window_watcher()
+
+    def os_client_height():
+        try:
+            return client_height(pygame.display.get_wm_info().get("window"))
+        except Exception:
+            return None
+
     pygame.init()
     pygame.display.set_caption("DenGo Controller Converter")
     
@@ -397,7 +413,7 @@ def main():
     ui.init_fonts()
 
     pygame.joystick.init()
-    joy = wait_for_compatible_controller()
+    joy = wait_for_compatible_controller(diag)
     if joy is None:
         pygame.quit()
         return
@@ -413,16 +429,6 @@ def main():
     bve_spec_receiver = BveVehicleSpecReceiver()
     bve_handle_publisher = BveHandleCommandPublisher()
     platform_detector = EfficientPlatformDetector(probe_interval=0.20, full_resync_interval=3.0)
-    # Opt-in diagnostics (environment variable DENGO_DIAG_LOG names the log file); a no-op when it is not set.
-    diag = DisplayDiagnostics.from_environment()
-    diag.open_note(version=CURRENT_VERSION)
-
-    def os_client_height():
-        try:
-            return client_height(pygame.display.get_wm_info().get("window"))
-        except Exception:
-            return None
-
     active_window_route = None
     input_was_enabled = False
     hidhide_configurator = HidHidePcsx2Configurator()
@@ -481,7 +487,7 @@ def main():
                     virtual_gamepad_backend.disconnect()
                     input_was_enabled = False
                     active_window_route = None
-                    joy = wait_for_compatible_controller()
+                    joy = wait_for_compatible_controller(diag)
                     if joy is None:
                         running = False
                     else:

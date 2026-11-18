@@ -146,5 +146,88 @@ class DiagTests(unittest.TestCase):
         self.assertFalse(bad.enabled)
 
 
+def win(cls="pygame", cw=800, ch=600, ow=816, oh=639, x=100, y=100, dpi=96, mdpi=96, aware=1):
+    return (cls, cw, ch, ow, oh, x, y, dpi, mdpi, aware)
+
+
+class WatcherTests(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.path = os.path.join(self.dir.name, "diag.log")
+        self.clock = FakeClock()
+        self.diag = DisplayDiagnostics(self.path, clock=self.clock, wall=lambda: datetime(2026, 11, 18, 5, 0, 0))
+        self.snap = {"windows": {}, "monitors": ((0, 0, 1920, 1080, 96), (1920, 0, 3840, 1080, 96))}
+        from display_diagnostics import WindowWatcher
+        self.watcher = WindowWatcher(self.diag, snapshot_fn=lambda: (dict(self.snap["windows"]), self.snap["monitors"]),
+                                     clock=self.clock, flood_lines=6, flood_window_s=10.0)
+
+    def lines(self):
+        if not os.path.exists(self.path):
+            return []
+        with open(self.path, encoding="utf-8") as handle:
+            return handle.read().splitlines()
+
+    def test_monitors_logged_at_start_and_on_change_only(self):
+        self.watcher.poll()
+        self.watcher.poll()
+        self.snap["monitors"] = ((0, 0, 1920, 1080, 96), (1920, 0, 3840, 1080, 120), (3840, 0, 5760, 1080, 144))
+        self.watcher.poll()
+        lines = [l for l in self.lines() if " MONITORS " in l]
+        self.assertEqual(len(lines), 2)
+        self.assertIn("n=2 [0,0,1920,1080 dpi=96] [1920,0,3840,1080 dpi=96]", lines[0])
+        self.assertIn("n=3", lines[1])
+        self.assertIn("(was n=2)", lines[1])
+
+    def test_window_appear_change_and_disappear(self):
+        self.watcher.poll()
+        self.snap["windows"] = {0x100: win("#32770", 329, 127, 345, 166)}
+        self.watcher.poll()
+        self.snap["windows"] = {0x100: win("#32770", 418, 176, 434, 215, mdpi=120)}      # the dialog grows (screenshot 4989)
+        self.watcher.poll()
+        self.watcher.poll()                                                               # unchanged -> nothing
+        self.snap["windows"] = {}
+        self.watcher.poll()
+        win_lines = [l for l in self.lines() if " WINDOW " in l]
+        self.assertEqual(len(win_lines), 3)
+        self.assertIn("+ hwnd=0x100 class=#32770 client=329x127 outer=345x166", win_lines[0])
+        self.assertIn("~ hwnd=0x100 client 329x127->418x176 outer 345x166->434x215 mon_dpi 96->120", win_lines[1])
+        self.assertIn("- hwnd=0x100 class=#32770", win_lines[2])
+
+    def test_flood_is_capped_and_reported_once(self):
+        for i in range(30):
+            self.snap["windows"] = {0x100: win(cw=800 + i)}
+            self.watcher.poll()
+            self.clock.advance(0.1)
+        lines = self.lines()
+        self.assertLessEqual(len([l for l in lines if re.search(r"\+\s*[\d.]+\s+WINDOW\s", l)]), 6)
+        self.assertEqual(len([l for l in lines if re.search(r"\+\s*[\d.]+\s+WINFLOOD\s", l)]), 1)
+
+    def test_start_is_a_noop_when_disabled_and_stop_is_safe(self):
+        off = DisplayDiagnostics(None, clock=self.clock)
+        self.assertIsNone(off.start_window_watcher())
+        off.stop_window_watcher()
+
+    def test_thread_logs_and_stops(self):
+        import time as real_time
+        diag = DisplayDiagnostics(self.path, wall=lambda: datetime(2026, 11, 18, 5, 0, 0))
+        watcher = diag.start_window_watcher(interval_s=0.02, snapshot_fn=lambda: ({0x1: win()}, ((0, 0, 800, 600, 96),)))
+        deadline = real_time.time() + 3
+        while real_time.time() < deadline and not any(" WINDOW " in l for l in self.lines()):
+            real_time.sleep(0.02)
+        diag.stop_window_watcher()
+        self.assertTrue(any(" WINDOW " in l for l in self.lines()))
+        self.assertTrue(any(" MONITORS " in l for l in self.lines()))
+
+    def test_real_snapshot_is_read_only_and_never_raises(self):
+        from display_diagnostics import win32_snapshot, process_dpi_awareness
+        windows, monitors = win32_snapshot()
+        self.assertIsInstance(windows, dict)
+        self.assertGreaterEqual(len(monitors), 1)                 # at least the primary monitor, with a DPI value
+        self.assertTrue(all(len(m) == 5 for m in monitors))
+        self.assertIn(process_dpi_awareness().split("(")[0], ("unaware", "system", "permonitor", "unknown"))
+        self.assertEqual(win32_snapshot(pid=-1)[0], {})
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

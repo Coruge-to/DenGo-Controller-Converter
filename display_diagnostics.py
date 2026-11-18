@@ -12,6 +12,10 @@ What it answers when the glitch is seen again:
   SLOW      a named section of the main loop (platform scan, ViGEm connect, HidHide setup ...) took long
   LOOPGAP   the whole main-loop iteration took long (the window could not be repainted in the meantime)
   MODE / JOY  mode switch and controller removal, which reset state
+  WINDOW    (background thread, also while the main thread is blocked in a message box) a window of this process
+            appeared (+), changed size / position / DPI (~) or went away (-)
+  MONITORS  the monitor layout and each monitor's DPI, at start and whenever it changes
+  DIALOG    the controller-not-found retry dialog was shown / answered
 """
 
 import os
@@ -50,6 +54,187 @@ def describe_view(statuses):
             pids = ",".join(str(p) for p in getattr(status, "process_ids", ()))
             parts.append("%s:[%s]" % (getattr(status, "platform_id", "?"), pids))
     return ",".join(parts) if parts else "-"
+
+
+_AWARENESS_NAMES = {0: "unaware", 1: "system", 2: "permonitor"}
+
+
+def process_dpi_awareness():
+    """DPI awareness of the calling thread: 'unaware' / 'system' / 'permonitor' (or 'unknown')."""
+    try:
+        import ctypes
+
+        user32 = ctypes.WinDLL("user32")
+        user32.GetThreadDpiAwarenessContext.restype = ctypes.c_void_p
+        user32.GetAwarenessFromDpiAwarenessContext.argtypes = [ctypes.c_void_p]
+        value = int(user32.GetAwarenessFromDpiAwarenessContext(user32.GetThreadDpiAwarenessContext()))
+        return _AWARENESS_NAMES.get(value, "unknown(%d)" % value)
+    except Exception:
+        return "unknown"
+
+
+def win32_snapshot(pid=None):
+    """(windows, monitors) for this process. windows = {hwnd: (class, client_w, client_h, outer_w, outer_h, x, y,
+    window_dpi, monitor_dpi, awareness)}; monitors = ((left, top, right, bottom, dpi), ...). Read-only, never raises."""
+    windows, monitors = {}, []
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        pid = os.getpid() if pid is None else pid
+        user32 = ctypes.WinDLL("user32")            # private handle: does not touch the prototypes other code uses
+        try:
+            shcore = ctypes.WinDLL("shcore")
+        except OSError:
+            shcore = None
+        user32.IsWindowVisible.argtypes = [wintypes.HWND]
+        user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+        user32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+        user32.GetClientRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+        user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+        user32.MonitorFromWindow.argtypes = [wintypes.HWND, wintypes.DWORD]
+        user32.MonitorFromWindow.restype = ctypes.c_void_p
+        get_window_dpi = getattr(user32, "GetDpiForWindow", None)
+        if get_window_dpi:
+            get_window_dpi.argtypes = [wintypes.HWND]
+        get_window_ctx = getattr(user32, "GetWindowDpiAwarenessContext", None)
+        get_aware = getattr(user32, "GetAwarenessFromDpiAwarenessContext", None)
+        if get_window_ctx and get_aware:
+            get_window_ctx.argtypes = [wintypes.HWND]
+            get_window_ctx.restype = ctypes.c_void_p
+            get_aware.argtypes = [ctypes.c_void_p]
+        if shcore:
+            shcore.GetDpiForMonitor.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_uint), ctypes.POINTER(ctypes.c_uint)]
+
+        def monitor_dpi(handle):
+            try:
+                if shcore and handle:
+                    x, y = ctypes.c_uint(0), ctypes.c_uint(0)
+                    if shcore.GetDpiForMonitor(handle, 0, ctypes.byref(x), ctypes.byref(y)) == 0:
+                        return int(x.value)
+            except Exception:
+                pass
+            return None
+
+        enum_windows = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+        def on_window(hwnd, _):
+            try:
+                if not user32.IsWindowVisible(hwnd):
+                    return True
+                owner = wintypes.DWORD(0)
+                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+                if int(owner.value) != pid:
+                    return True
+                name = ctypes.create_unicode_buffer(128)
+                user32.GetClassNameW(hwnd, name, 128)
+                client, outer = wintypes.RECT(), wintypes.RECT()
+                user32.GetClientRect(hwnd, ctypes.byref(client))
+                user32.GetWindowRect(hwnd, ctypes.byref(outer))
+                window_dpi = int(get_window_dpi(hwnd)) if get_window_dpi else None
+                awareness = int(get_aware(get_window_ctx(hwnd))) if (get_window_ctx and get_aware) else None
+                windows[int(hwnd)] = (name.value, client.right - client.left, client.bottom - client.top,
+                                      outer.right - outer.left, outer.bottom - outer.top, outer.left, outer.top,
+                                      window_dpi, monitor_dpi(user32.MonitorFromWindow(hwnd, 2)), awareness)
+            except Exception:
+                pass
+            return True
+
+        user32.EnumWindows(enum_windows(on_window), 0)
+
+        enum_monitors = ctypes.WINFUNCTYPE(wintypes.BOOL, ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(wintypes.RECT), wintypes.LPARAM)
+
+        def on_monitor(handle, dc, rect, _):
+            try:
+                monitors.append((rect.contents.left, rect.contents.top, rect.contents.right, rect.contents.bottom, monitor_dpi(handle)))
+            except Exception:
+                pass
+            return True
+
+        user32.EnumDisplayMonitors.argtypes = [ctypes.c_void_p, ctypes.c_void_p, enum_monitors, wintypes.LPARAM]
+        user32.EnumDisplayMonitors(None, None, enum_monitors(on_monitor), 0)
+    except Exception:
+        pass
+    return windows, tuple(monitors)
+
+
+def _describe_window(w):
+    return "class=%s client=%dx%d outer=%dx%d pos=%d,%d dpi=%s mon_dpi=%s aware=%s" % w
+
+
+def _window_changes(old, new):
+    names = ("class", "client", "outer", "pos", "dpi", "mon_dpi", "aware")
+    pairs = ((old[0], new[0]), ("%dx%d" % old[1:3], "%dx%d" % new[1:3]), ("%dx%d" % old[3:5], "%dx%d" % new[3:5]),
+             ("%d,%d" % old[5:7], "%d,%d" % new[5:7]), (old[7], new[7]), (old[8], new[8]), (old[9], new[9]))
+    return " ".join("%s %s->%s" % (n, a, b) for n, (a, b) in zip(names, pairs) if a != b)
+
+
+class WindowWatcher:
+    """Polls this process's visible top-level windows (including a modal message box the main thread is blocked in)
+    and the monitor layout / DPI, and logs only the CHANGES: WINDOW (+ new, ~ changed, - gone), MONITORS."""
+
+    def __init__(self, diag, interval_s=0.25, snapshot_fn=None, clock=time.monotonic, flood_lines=60, flood_window_s=10.0):
+        self._diag = diag
+        self._interval = float(interval_s)
+        self._snapshot = snapshot_fn or win32_snapshot
+        self._clock = clock
+        self._prev = None
+        self._monitors = None
+        self._flood_lines = int(flood_lines)
+        self._flood_window = float(flood_window_s)
+        self._recent = deque()
+        self._flood_reported_at = None
+        self._stop = threading.Event()
+        self._thread = None
+
+    def _emit(self, text):
+        now = self._clock()
+        self._recent.append(now)
+        while self._recent and now - self._recent[0] > self._flood_window:
+            self._recent.popleft()
+        if len(self._recent) > self._flood_lines:
+            if self._flood_reported_at is None or now - self._flood_reported_at > self._flood_window:
+                self._flood_reported_at = now
+                self._diag.log("WINFLOOD", "more than %d WINDOW changes within %.0fs; further lines are skipped" % (self._flood_lines, self._flood_window))
+            return
+        self._diag.log("WINDOW", text)
+
+    def poll(self):
+        windows, monitors = self._snapshot()
+        if monitors != self._monitors:
+            self._diag.log("MONITORS", "n=%d %s%s" % (
+                len(monitors), " ".join("[%d,%d,%d,%d dpi=%s]" % m for m in monitors),
+                "" if self._monitors is None else " (was n=%d)" % len(self._monitors)))
+            self._monitors = monitors
+        previous = self._prev if self._prev is not None else {}
+        for hwnd in sorted(windows):
+            if hwnd not in previous:
+                self._emit("+ hwnd=0x%X %s" % (hwnd, _describe_window(windows[hwnd])))
+            elif windows[hwnd] != previous[hwnd]:
+                self._emit("~ hwnd=0x%X %s" % (hwnd, _window_changes(previous[hwnd], windows[hwnd])))
+        for hwnd in sorted(set(previous) - set(windows)):
+            self._emit("- hwnd=0x%X class=%s" % (hwnd, previous[hwnd][0]))
+        self._prev = windows
+
+    def _run(self):
+        failures = 0
+        while True:
+            try:
+                self.poll()
+            except Exception:
+                failures += 1
+                if failures >= 5:
+                    return
+            if self._stop.wait(self._interval):
+                return
+
+    def start(self):
+        if self._thread is None and self._diag.enabled:
+            self._thread = threading.Thread(target=self._run, name="dengo-diag-windows", daemon=True)
+            self._thread.start()
+
+    def stop(self):
+        self._stop.set()
 
 
 class DisplayDiagnostics:
@@ -98,6 +283,19 @@ class DisplayDiagnostics:
                     handle.write(line)
         except Exception:
             self._errors += 1
+
+    def start_window_watcher(self, interval_s=0.25, snapshot_fn=None):
+        """Start the background window / monitor watcher (a no-op unless diagnostics are enabled)."""
+        if not self.enabled or getattr(self, "_watcher", None) is not None:
+            return None
+        self._watcher = WindowWatcher(self, interval_s=interval_s, snapshot_fn=snapshot_fn)
+        self._watcher.start()
+        return self._watcher
+
+    def stop_window_watcher(self):
+        watcher = getattr(self, "_watcher", None)
+        if watcher is not None:
+            watcher.stop()
 
     def open_note(self, **fields):
         self.log("OPEN", " ".join("%s=%s" % (k, v) for k, v in fields.items()) + " pid=%d" % os.getpid())
