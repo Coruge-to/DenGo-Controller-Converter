@@ -29,6 +29,7 @@ from virtual_gamepad_backend import VirtualGamepadBackend
 from hidhide_pcsx2 import HidHidePcsx2Configurator
 from update_checker import CURRENT_VERSION, check_latest_release
 from display_diagnostics import DisplayDiagnostics, client_height, process_dpi_awareness
+from dpi_awareness import force_unaware_for_this_thread
 
 try:
     myappid = 'my.dengo.converter.v21.ux_improved'
@@ -379,10 +380,14 @@ def show_virtual_gamepad_unavailable(exc):
         return selected_button.value
 
 def main():
+    # Pin every window DenGo creates (pygame window, message boxes) to DPI-UNAWARE no matter how the process was started: a DenGo started by BVE
+    # inherits BveTs.exe's HIGHDPIAWARE compatibility flag and its window then comes out at 533x413 instead of 800x620 (150% display) and
+    # message boxes grow / stay half laid out on a display scale change. Must run before pygame.init() and before any message box.
+    dpi_pin = force_unaware_for_this_thread()
     # Opt-in diagnostics (environment variable DENGO_DIAG_LOG names the log file); a no-op when it is not set.
     # Created first so that the controller-not-found dialog and the window / monitor DPI changes are covered too.
     diag = DisplayDiagnostics.from_environment()
-    diag.open_note(version=CURRENT_VERSION, dpi_awareness=process_dpi_awareness())
+    diag.open_note(version=CURRENT_VERSION, dpi_awareness=process_dpi_awareness(), dpi_pin=dpi_pin)
     diag.start_window_watcher()
 
     def os_client_height():
