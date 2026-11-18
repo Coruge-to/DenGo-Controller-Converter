@@ -29,7 +29,28 @@ function Get-BaselineText([string]$Rel) {
     $text = (New-Object System.Text.UTF8Encoding($false)).GetString($ms.ToArray())
     return $text.TrimStart([char]0xFEFF).Replace("`r`n", "`n")
 }
-function Get-CurrentText([string]$Path) { return ((New-Object System.Text.UTF8Encoding($false)).GetString((Read-Bytes $Path))).TrimStart([char]0xFEFF).Replace("`r`n", "`n") }
+function Get-CurrentTextRaw([string]$Path) { return ((New-Object System.Text.UTF8Encoding($false)).GetString((Read-Bytes $Path))).TrimStart([char]0xFEFF).Replace("`r`n", "`n") }
+# I4 follow-up (owner decision 2026-11-18: Japanese GUI error texts). Each GUI gained exactly ONE function (Get-DenGoGuiErrorText) and exactly ONE call-site line. The guards below compare the GUI scripts with the I2-B / I3 baselines,
+# so the current text is first normalised back by exactly that known change (the function is cut out, the call line is reverted) and EVERYTHING ELSE is still compared strictly. If the known pieces are not present exactly once, the text is
+# returned unchanged and the guards fail. The new behaviour itself is fixed by Test-DenGoInstaller-I4-GuiMessages.ps1.
+function Remove-I4GuiMessageChange([string]$Path, [string]$Text) {
+    $map = @{
+        'DenGoInstallerGui.ps1'   = @('$detail=Get-DenGoGuiErrorText -ErrorCode ([string]$script:plan.ErrorCode) -ErrorMessage ([string]$script:plan.ErrorMessage);', '$detail=[string]$script:plan.ErrorMessage;')
+        'DenGoUninstallerGui.ps1' = @('$detail = Get-DenGoGuiErrorText -ErrorCode ([string]$result.ErrorCode) -ErrorMessage ([string]$result.ErrorMessage)', '$detail = [string]$result.ErrorMessage')
+    }
+    $leaf = [System.IO.Path]::GetFileName($Path)
+    if (-not $map.ContainsKey($leaf)) { return $Text }
+    $new = $map[$leaf][0]; $old = $map[$leaf][1]
+    if (([regex]::Matches($Text, [regex]::Escape($new))).Count -ne 1) { return $Text }
+    $tk = $null; $er = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseInput($Text, [ref]$tk, [ref]$er)
+    $fn = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Get-DenGoGuiErrorText' }, $true))
+    if ($fn.Count -ne 1) { return $Text }
+    $st = $fn[0].Extent.StartOffset; $en = $fn[0].Extent.EndOffset
+    if (($en -lt $Text.Length) -and ($Text[$en] -eq "`n")) { $en++ }
+    return ($Text.Substring(0, $st) + $Text.Substring($en)).Replace($new, $old)
+}
+function Get-CurrentText([string]$Path) { return (Remove-I4GuiMessageChange $Path (Get-CurrentTextRaw $Path)) }
 function Get-FunctionTexts([string]$Text) {
     $tokens = $null; $errors = $null
     $ast = [System.Management.Automation.Language.Parser]::ParseInput($Text, [ref]$tokens, [ref]$errors)

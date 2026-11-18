@@ -298,6 +298,15 @@ function Join-NativeArguments {
 }
 
 # --- I1 result contract: Completed (exit 0) / Cancelled (exit 2) / Failed (exit 1) ---
+function Get-DenGoGuiErrorText([string]$ErrorCode,[string]$ErrorMessage) {
+    # The engine messages are English and are pinned by the engine tests; the dialog shows a Japanese text for these two codes (the engine's reason / outcome stays in parentheses) and the engine message unchanged for any other code.
+    $suffix=''
+    $m=[regex]::Match([string]$ErrorMessage,'\((\w+)\)')
+    if($m.Success){$suffix='('+$m.Groups[1].Value+')'}
+    if($ErrorCode -ceq 'AnotherOperationRunning'){return ('他のセットアップまたはアンインストールが実行中です。終了してから、もう一度やり直してください。'+$suffix)}
+    if($ErrorCode -ceq 'RecoveryCompletedOperationNotCompleted'){return ('前回中断された操作を復旧しました。今回の操作は開始していません。もう一度やり直してください。'+$suffix)}
+    return [string]$ErrorMessage
+}
 function Show-GuiError {
     param([string]$Text)
     [void][System.Windows.Forms.MessageBox]::Show($Text,[regex]::Unescape('DenGo \u30A2\u30F3\u30A4\u30F3\u30B9\u30C8\u30FC\u30EB'),[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Error)
@@ -431,7 +440,7 @@ $timer.Add_Tick({
         return
     }
     if ($exitCode -ne 0 -or -not [bool]$result.Succeeded) {
-        $detail = [string]$result.ErrorMessage
+        $detail = Get-DenGoGuiErrorText -ErrorCode ([string]$result.ErrorCode) -ErrorMessage ([string]$result.ErrorMessage)
         if ([string]::IsNullOrWhiteSpace($detail)) { $detail = 'アンインストールに失敗しました。' }
         [System.Windows.Forms.MessageBox]::Show($detail,'DenGo アンインストール',[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
         Set-RunFailed 'EngineFailed'
