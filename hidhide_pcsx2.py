@@ -6,6 +6,22 @@ import time
 from pathlib import Path
 
 
+HIDHIDE_RELEASES_URL = "https://github.com/nefarius/HidHide/releases"
+
+
+class HidHideNotInstalledError(RuntimeError):
+    """HidHide (its command line tool) is not installed on this PC."""
+
+
+def find_hidhide_cli(program_files=None):
+    root = program_files if program_files is not None else os.environ.get("ProgramFiles", r"C:\Program Files")
+    candidates = (
+        Path(root) / "Nefarius Software Solutions" / "HidHide" / "HidHideCLI.exe",
+        Path(root) / "Nefarius Software Solutions" / "HidHide" / "x64" / "HidHideCLI.exe",
+    )
+    return next((candidate for candidate in candidates if candidate.is_file()), None)
+
+
 class HidHidePcsx2Configurator:
     def __init__(self, retry_seconds=15.0):
         self._retry_seconds = float(retry_seconds)
@@ -35,15 +51,15 @@ class HidHidePcsx2Configurator:
             return True
 
     @staticmethod
-    def _apply(pcsx2_executable):
-        program_files = os.environ.get("ProgramFiles", r"C:\Program Files")
-        candidates = (
-            Path(program_files) / "Nefarius Software Solutions" / "HidHide" / "HidHideCLI.exe",
-            Path(program_files) / "Nefarius Software Solutions" / "HidHide" / "x64" / "HidHideCLI.exe",
-        )
-        cli = next((candidate for candidate in candidates if candidate.is_file()), None)
+    def require_installed():
+        cli = find_hidhide_cli()
         if cli is None:
-            raise RuntimeError("HidHideCLI.exe was not found")
+            raise HidHideNotInstalledError("HidHideCLI.exe was not found")
+        return cli
+
+    @staticmethod
+    def _apply(pcsx2_executable):
+        cli = HidHidePcsx2Configurator.require_installed()
 
         script = r'''$ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2.0

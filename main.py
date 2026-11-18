@@ -26,7 +26,7 @@ from bve_handle_ipc import BveHandleCommandPublisher
 from platform_detection import EfficientPlatformDetector
 from window_message_backend import WindowMessageBackend, WindowTarget
 from virtual_gamepad_backend import VirtualGamepadBackend
-from hidhide_pcsx2 import HidHidePcsx2Configurator
+from hidhide_pcsx2 import HidHidePcsx2Configurator, HidHideNotInstalledError, HIDHIDE_RELEASES_URL
 from update_checker import CURRENT_VERSION, check_latest_release
 from display_diagnostics import DisplayDiagnostics, client_height, process_dpi_awareness
 from dpi_awareness import force_unaware_for_this_thread
@@ -49,7 +49,7 @@ MB_ICONWARNING = 0x00000030
 IDYES = 6
 IDRETRY = 4
 VIGEMBUS_RELEASES_URL = "https://github.com/nefarius/ViGEmBus/releases"
-VIGEMBUS_ACTION_OPEN = 1001
+DEPENDENCY_ACTION_OPEN = 1001
 
 def _check_for_updates_worker(result_queue):
     result = check_latest_release()
@@ -345,8 +345,19 @@ def show_virtual_gamepad_unavailable(exc):
             + "\n\nViGEmBusが利用可能になるまで、\n"
             "DenGo Controller Converterは起動できません。"
         )
+    return _show_dependency_unavailable("仮想ゲームパッドを開始できませんでした。", content, VIGEMBUS_RELEASES_URL)
+
+def show_hidhide_unavailable():
+    content = (
+        "HidHideをインストールしてWindowsを再起動してください。\n\n"
+        "HidHideが利用可能になるまで、\n"
+        "DenGo Controller Converterは起動できません。"
+    )
+    return _show_dependency_unavailable("HidHideが見つかりませんでした。", content, HIDHIDE_RELEASES_URL)
+
+def _show_dependency_unavailable(main_instruction, content, releases_url):
     buttons = (TASKDIALOG_BUTTON * 1)(
-        TASKDIALOG_BUTTON(VIGEMBUS_ACTION_OPEN, "配布ページを開く"),
+        TASKDIALOG_BUTTON(DEPENDENCY_ACTION_OPEN, "配布ページを開く"),
     )
     config = TASKDIALOGCONFIG()
     config.cbSize = ctypes.sizeof(TASKDIALOGCONFIG)
@@ -354,7 +365,7 @@ def show_virtual_gamepad_unavailable(exc):
     config.dwCommonButtons = 0x00000010
     config.pszWindowTitle = "DenGo Controller Converter"
     config.pszMainIcon = ctypes.c_wchar_p(ctypes.c_uint16(-1).value)
-    config.pszMainInstruction = "仮想ゲームパッドを開始できませんでした。"
+    config.pszMainInstruction = main_instruction
     config.pszContent = content
     config.cButtons = len(buttons)
     config.pButtons = buttons
@@ -374,8 +385,8 @@ def show_virtual_gamepad_unavailable(exc):
         )
         if result != 0:
             raise ctypes.WinError(result)
-        if selected_button.value == VIGEMBUS_ACTION_OPEN:
-            webbrowser.open(VIGEMBUS_RELEASES_URL)
+        if selected_button.value == DEPENDENCY_ACTION_OPEN:
+            webbrowser.open(releases_url)
             continue
         return selected_button.value
 
@@ -582,6 +593,7 @@ def main():
                     diag.event("VIGEM", "connect (PCSX2 is the single platform)")
                     with diag.section("vigem.connect"):
                         virtual_gamepad_backend.connect()
+                    hidhide_configurator.require_installed()
                     pcsx2_paths = tuple(getattr(single_platform, "executable_paths", ()))
                     pcsx2_path = pcsx2_paths[0] if len(pcsx2_paths) == 1 else ""
                     with diag.section("hidhide.ensure_configured"):
@@ -590,6 +602,12 @@ def main():
                         with diag.section("vigem.reconnect"):
                             virtual_gamepad_backend.disconnect()
                             virtual_gamepad_backend.connect()
+                except HidHideNotInstalledError as exc:
+                    print(f"HidHide unavailable: {exc}", flush=True)
+                    virtual_gamepad_backend.disconnect()
+                    action = show_hidhide_unavailable()
+                    if action != IDRETRY:
+                        running = False
                 except RuntimeError as exc:
                     print(f"Virtual gamepad unavailable: {exc}", flush=True)
                     action = show_virtual_gamepad_unavailable(exc)
